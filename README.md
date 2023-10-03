@@ -1,6 +1,7 @@
 # Transmutor
-### Scale and Transform glyphs in the RoboFont glyph window using MutatorScale
-#### By Colin M. Ford and OH no Type Co.
+_Scale and Transform glyphs in the RoboFont glyph window using MutatorScale_
+
+__By Colin M. Ford and OH no Type Co.__
 
 ![Transmutor Screenshot](images/Transmutor.png)
 
