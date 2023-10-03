@@ -1,0 +1,52 @@
+# Auto detect text files and perform LF normalization
+*                   text=auto
+
+## GENERAL
+*.md                text diff=markdown
+*.sh                text diff=bash
+*.html              text diff=html
+*.py                text diff=python
+*.xml               text
+*.csv               text
+
+## OFFICE
+*.docx              binary
+*.pptx              binary
+
+## FONT
+*.fea               text
+*.glyphconstruction text
+*.plist             text
+*.glif              text
+*.glyphs            text
+*.enc               text
+*.mmg               text
+
+## GRAPHICS
+*.ai                binary
+*.indd              binary
+*.bmp               binary
+*.eps               binary
+*.gif               binary
+*.jpg               binary
+*.jpeg              binary
+*.pdf               binary
+*.png               binary
+*.psb               binary
+*.psd               binary
+*.svg               text
+*.svgz              binary
+*.tif               binary
+*.tiff              binary
+
+## ARCHIVES
+*.zip               binary
+
+## BINARY FONTS
+*.ttf               binary
+*.eot               binary
+*.otf               binary
+*.woff              binary
+*.woff2             binary
+
+

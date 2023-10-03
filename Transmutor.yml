@@ -1,0 +1,14 @@
+extensionName: Transmutor
+repository: https://github.com/ohnotypeco/Scale-Faster-Ext
+extensionPath: Transmutor.roboFontExt
+description: Scale Fast in the glyph window
+developer: OH no Type Co.
+developerURL: https://github.com/ohnotypeco
+tags: 
+  - interpolation
+  - design helpers
+  - glyph view
+  - MutatorMath
+  - scale
+  - transform
+icon: https://raw.githubusercontent.com/ohnotypeco/Scale-Faster-Ext/main/Transmutor.roboFontExt/resources/icon.png
