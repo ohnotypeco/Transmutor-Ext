@@ -1,3 +1,3 @@
-[submodule "Transmutor.roboFontExt/submodules/MutatorScale"]
+[submodule "MutatorScale"]
 	path = Transmutor.roboFontExt/submodules/MutatorScale
 	url = https://github.com/roboDocs/MutatorScale
