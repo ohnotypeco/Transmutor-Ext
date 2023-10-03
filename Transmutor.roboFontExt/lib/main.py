@@ -1,34 +1,57 @@
+############################################################
+#                                                          #
+#            OOOOO  HH   HH    NN   NN  OOOOO              #
+#           OO   OO HH   HH    NNN  NN OO   OO             #
+#           OO   OO HHHHHHH    NN N NN OO   OO             #
+#           OO   OO HH   HH    NN  NNN OO   OO             #
+#            OOOO0  HH   HH    NN   NN  OOOO0              #
+#                                                          #
+#    TTTTTTT YY   YY PPPPPP  EEEEEEE     CCCCC   OOOOO     #
+#      TTT   YY   YY PP   PP EE         CC    C OO   OO    #
+#      TTT    YYYYY  PPPPPP  EEEEE      CC      OO   OO    #
+#      TTT     YYY   PP      EE         CC    C OO   OO    #
+#      TTT     YYY   PP      EEEEEEE     CCCCC   OOOO0     #
+#                                                          #
+############################################################
+#                                                          #
+#         By Colin M. Ford and OH no Type Co, 2023         #
+#     See license file for use and distribution terms.     #
+#                                                          #
+#  Huge thanks to Loïc Sander for MutatorScale/ScaleFast   #
+#                                                          #
+############################################################
+
+
 import functools
-import site
 import os
+import site
 
 import AppKit
 import ezui
-# from lib.tools.defaults import getDefaultColor
 from mojo.events import BaseEventTool, installTool
 from mojo.roboFont import version
 from mojo.UI import CurrentGlyphWindow, getDefault
 
-if version > "4.4":
+try:
     from mojo.UI import appearanceColorKey
+except ImportError:
+    pass
 
-# if mutatorScale is already available, used that
 try:
     import mutatorScale
 except ImportError:
-    # get the path to the MutatorScale lib folder    
     mutatorScaleLibFolder = os.path.join(os.getcwd(), "..", "submodules", "MutatorScale", "lib")
-    print(mutatorScaleLibFolder)
-    print(os.path.exists(mutatorScaleLibFolder))
-    # add the MutatorScale lib folder to the site-packages
     site.addsitedir(mutatorScaleLibFolder)
 finally:
     from mutatorScale.objects.scaler import MutatorScaleEngine
     from mutatorScale.utilities.fontUtils import getRefStems, makeListFontName
-    
+
+
 VERBOSE = False
 EXTENSION_IDENTIFIER = "co.ohnotype.Transmutor"
 VERSION = "0.1"
+
+TOOLBAR_ICON = AppKit.NSImage.alloc().initByReferencingFile_(os.path.join(os.getcwd(), "..", "resources", "icon.pdf"))
 
 
 def verbosePrint(s):
@@ -101,8 +124,14 @@ class TransmutorModel():
 
     transformOrigin = (0.5, 0.5)
 
-    scaledGlyphColor = (1.0, 0.0, 0.0, 0.5)
-
+    @property
+    def scaledGlyphColor(self):
+        verbosePrint("TransmutorModel::scaledGlyphColor")
+        if version > "4.4":
+            return getDefault(appearanceColorKey("glyphViewTransformationColor"))
+        else:
+            return getDefault("glyphViewTransformationColor")
+        
     @property
     def previewColor(self):
         verbosePrint("TransmutorModel::previewColor")
@@ -179,8 +208,6 @@ class TransmutorPanel(ezui.WindowController):
         self.model.allFonts = [font for font in AllFonts(sortOptions=["magic"])]
         self.model.activeFonts = [font for font in self.model.allFonts if font.info.familyName]
         self.model.updateScaler()
-
-        # TODO: The table is not working, I don't think it works with two column forms
 
         content = """
         = TwoColumnForm
@@ -294,19 +321,12 @@ class TransmutorPanel(ezui.WindowController):
             content=content,
             descriptionData=descriptionData,
             controller=self,
-            title="Transmutor",
+            title=f"Transmutor v{VERSION}",
             autosaveName="TransmutorPanel",
             activeItem="glyphNamesTextBox",
             size=(300, "auto"),
             closable=False,
         )
-        # self.w.getNSWindow().setTitlebarHeight_(22)
-        # self.w.getNSWindow().setTitlebarAppearsTransparent_(True)
-
-        # window = self.w.getNSWindow()
-        # styleMask = window.styleMask()
-        # styleMask -= AppKit.NSWindowStyleMaskClosable
-        # window.setStyleMask_(styleMask)
 
         self.stemWtRatioVSlider = self.w.getItem("stemWtRatioVSlider")
         self.stemWtRatioHSlider = self.w.getItem("stemWtRatioHSlider")
@@ -443,13 +463,12 @@ class TransmutorToolController(BaseEventTool):
     def getToolbarTip(self):
         return "Transmutor"
 
-    # def getToolbarIcon(self):
-    #     return(toolbarIcon)
+    def getToolbarIcon(self):
+        return (TOOLBAR_ICON)
 
     def setup(self):
         verbosePrint("Transmutor::setup")
         self.becomeActive()
-
 
     def becomeActive(self):
         verbosePrint("Transmutor::becomeActive")
@@ -498,16 +517,6 @@ class TransmutorToolController(BaseEventTool):
 
             self.active = False
 
-    # def applicationDidBecomeActive(self, info):
-    #     verbosePrint("Transmutor::applicationDidBecomeActive")
-    #     if self.active == True:
-    #         self.reset()
-
-    # def applicationWillResignActive(self, info):
-    #     verbosePrint("Transmutor::applicationWillResignActive")
-    #     if self.active == True:
-    #         self.reset()
-
     def fontBecameCurrent(self):
         verbosePrint("Transmutor::fontBecameCurrent")
         if self.active == True:
@@ -522,7 +531,7 @@ class TransmutorToolController(BaseEventTool):
         verbosePrint("Transmutor::viewDidChangeGlyph")
         if self.active == True:
             self.reset()
-    
+
     def currentGlyphChanged(self):
         verbosePrint("Transmutor::currentGlyphChanged")
         if self.active == True:
@@ -578,58 +587,26 @@ class TransmutorToolController(BaseEventTool):
                             # print the corner if the `point` is within 10 units of it
                             if scaledGlyph.bounds[0]-hitSize+self.model.offsetX < x < scaledGlyph.bounds[0]+hitSize+self.model.offsetX and scaledGlyph.bounds[1]-hitSize+self.model.offsetY < y < scaledGlyph.bounds[1]+hitSize+self.model.offsetY:
                                 self.corner = (0.0, 0.0)
-                                self.model.offsetX += interpolate(scaledGlyph.bounds[0],
-                                                                scaledGlyph.bounds[2],
-                                                                1.0) - interpolate(scaledGlyph.bounds[0],
-                                                                                    scaledGlyph.bounds[2],
-                                                                                    self.model.transformOrigin[0])
-                                self.model.offsetY += interpolate(scaledGlyph.bounds[1],
-                                                                scaledGlyph.bounds[3],
-                                                                1.0) - interpolate(scaledGlyph.bounds[1],
-                                                                                    scaledGlyph.bounds[3],
-                                                                                    self.model.transformOrigin[1])
+                                self.model.offsetX += interpolate(scaledGlyph.bounds[0], scaledGlyph.bounds[2], 1.0) - interpolate(scaledGlyph.bounds[0], scaledGlyph.bounds[2], self.model.transformOrigin[0])
+                                self.model.offsetY += interpolate(scaledGlyph.bounds[1], scaledGlyph.bounds[3], 1.0) - interpolate(scaledGlyph.bounds[1], scaledGlyph.bounds[3], self.model.transformOrigin[1])
                                 self.model.transformOrigin = (1.0, 1.0)
                                 self.clickAction = "scaling"
                             elif scaledGlyph.bounds[2]-hitSize+self.model.offsetX < x < scaledGlyph.bounds[2]+hitSize+self.model.offsetX and scaledGlyph.bounds[3]-hitSize+self.model.offsetY < y < scaledGlyph.bounds[3]+hitSize+self.model.offsetY:
                                 self.corner = (1.0, 1.0)
-                                self.model.offsetX += interpolate(scaledGlyph.bounds[0],
-                                                                scaledGlyph.bounds[2],
-                                                                0.0) - interpolate(scaledGlyph.bounds[0],
-                                                                                    scaledGlyph.bounds[2],
-                                                                                    self.model.transformOrigin[0])
-                                self.model.offsetY += interpolate(scaledGlyph.bounds[1],
-                                                                scaledGlyph.bounds[3],
-                                                                0.0) - interpolate(scaledGlyph.bounds[1],
-                                                                                    scaledGlyph.bounds[3],
-                                                                                    self.model.transformOrigin[1])
+                                self.model.offsetX += interpolate(scaledGlyph.bounds[0], scaledGlyph.bounds[2], 0.0) - interpolate(scaledGlyph.bounds[0], scaledGlyph.bounds[2], self.model.transformOrigin[0])
+                                self.model.offsetY += interpolate(scaledGlyph.bounds[1], scaledGlyph.bounds[3], 0.0) - interpolate(scaledGlyph.bounds[1], scaledGlyph.bounds[3], self.model.transformOrigin[1])
                                 self.model.transformOrigin = (0.0, 0.0)
                                 self.clickAction = "scaling"
                             elif scaledGlyph.bounds[0]-hitSize+self.model.offsetX < x < scaledGlyph.bounds[0]+hitSize+self.model.offsetX and scaledGlyph.bounds[3]-hitSize+self.model.offsetY < y < scaledGlyph.bounds[3]+hitSize+self.model.offsetY:
                                 self.corner = (0.0, 1.0)
-                                self.model.offsetX += interpolate(scaledGlyph.bounds[0],
-                                                                scaledGlyph.bounds[2],
-                                                                1.0) - interpolate(scaledGlyph.bounds[0],
-                                                                                    scaledGlyph.bounds[2],
-                                                                                    self.model.transformOrigin[0])
-                                self.model.offsetY += interpolate(scaledGlyph.bounds[1],
-                                                                scaledGlyph.bounds[3],
-                                                                0.0) - interpolate(scaledGlyph.bounds[1],
-                                                                                    scaledGlyph.bounds[3],
-                                                                                    self.model.transformOrigin[1])
+                                self.model.offsetX += interpolate(scaledGlyph.bounds[0], scaledGlyph.bounds[2], 1.0) - interpolate(scaledGlyph.bounds[0], scaledGlyph.bounds[2], self.model.transformOrigin[0])
+                                self.model.offsetY += interpolate(scaledGlyph.bounds[1], scaledGlyph.bounds[3], 0.0) - interpolate(scaledGlyph.bounds[1], scaledGlyph.bounds[3], self.model.transformOrigin[1])
                                 self.model.transformOrigin = (1.0, 0.0)
                                 self.clickAction = "scaling"
                             elif scaledGlyph.bounds[2]-hitSize+self.model.offsetX < x < scaledGlyph.bounds[2]+hitSize+self.model.offsetX and scaledGlyph.bounds[1]-hitSize+self.model.offsetY < y < scaledGlyph.bounds[1]+hitSize+self.model.offsetY:
                                 self.corner = (1.0, 0.0)
-                                self.model.offsetX += interpolate(scaledGlyph.bounds[0],
-                                                                scaledGlyph.bounds[2],
-                                                                0.0) - interpolate(scaledGlyph.bounds[0],
-                                                                                    scaledGlyph.bounds[2],
-                                                                                    self.model.transformOrigin[0])
-                                self.model.offsetY += interpolate(scaledGlyph.bounds[1],
-                                                                scaledGlyph.bounds[3],
-                                                                1.0) - interpolate(scaledGlyph.bounds[1],
-                                                                                    scaledGlyph.bounds[3],
-                                                                                    self.model.transformOrigin[1])
+                                self.model.offsetX += interpolate(scaledGlyph.bounds[0], scaledGlyph.bounds[2], 0.0) - interpolate(scaledGlyph.bounds[0], scaledGlyph.bounds[2], self.model.transformOrigin[0])
+                                self.model.offsetY += interpolate(scaledGlyph.bounds[1], scaledGlyph.bounds[3], 1.0) - interpolate(scaledGlyph.bounds[1], scaledGlyph.bounds[3], self.model.transformOrigin[1])
                                 self.model.transformOrigin = (0.0, 1.0)
                                 self.clickAction = "scaling"
                             elif scaledGlyph.bounds[0]+self.model.offsetX < x < scaledGlyph.bounds[2]+self.model.offsetX and scaledGlyph.bounds[1]+self.model.offsetY < y < scaledGlyph.bounds[3]+self.model.offsetY:
@@ -640,14 +617,13 @@ class TransmutorToolController(BaseEventTool):
                             else:
                                 self.clickAction = None
                         else:
-
                             if self.clickAction == "scaling" and self.corner is not None:
                                 originPt = (
                                     interpolate(scaledGlyph.bounds[0] + self.model.offsetX, scaledGlyph.bounds[2] + self.model.offsetX, self.model.transformOrigin[0]),
                                     interpolate(scaledGlyph.bounds[1] + self.model.offsetY, scaledGlyph.bounds[3] + self.model.offsetY, self.model.transformOrigin[1]))
 
                                 unScaledPt = (interpolate(self.model.unScaledGlyphBounds[0], self.model.unScaledGlyphBounds[2], self.corner[0]) + self.model.offsetX,
-                                            interpolate(self.model.unScaledGlyphBounds[1], self.model.unScaledGlyphBounds[3], self.corner[1]) + self.model.offsetY)
+                                              interpolate(self.model.unScaledGlyphBounds[1], self.model.unScaledGlyphBounds[3], self.corner[1]) + self.model.offsetY)
 
                                 # get distance from originPt to unScaledPt, in H and V directions
                                 totalDistanceH = (unScaledPt[0] - originPt[0])
@@ -673,16 +649,8 @@ class TransmutorToolController(BaseEventTool):
                                 self.model.offsetX = x - self.clickX
                                 self.model.offsetY = y - self.clickY
                 else:
-                    self.model.offsetX += interpolate(scaledGlyph.bounds[0],
-                                                    scaledGlyph.bounds[2],
-                                                    0.5) - interpolate(scaledGlyph.bounds[0],
-                                                                        scaledGlyph.bounds[2],
-                                                                        self.model.transformOrigin[0])
-                    self.model.offsetY += interpolate(scaledGlyph.bounds[1],
-                                                    scaledGlyph.bounds[3],
-                                                    0.5) - interpolate(scaledGlyph.bounds[1],
-                                                                        scaledGlyph.bounds[3],
-                                                                        self.model.transformOrigin[1])
+                    self.model.offsetX += interpolate(scaledGlyph.bounds[0], scaledGlyph.bounds[2], 0.5) - interpolate(scaledGlyph.bounds[0], scaledGlyph.bounds[2], self.model.transformOrigin[0])
+                    self.model.offsetY += interpolate(scaledGlyph.bounds[1], scaledGlyph.bounds[3], 0.5) - interpolate(scaledGlyph.bounds[1], scaledGlyph.bounds[3], self.model.transformOrigin[1])
                     self.model.transformOrigin = (0.5, 0.5)
 
             self.redrawView()
