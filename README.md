@@ -2,6 +2,8 @@
 ### Scale and Transform glyphs in the RoboFont glyph window using MutatorScale
 #### By Colin M. Ford and OH no Type Co.
 
+![Transmutor Screenshot](images/Transmutor.png)
+
 [ScaleFast](https://github.com/roboDocs/ScaleFast) a fantastic extension for RoboFont. You should use it! It's really great at scaling whole swaths of glyphs while keeping the stem weights consistent — the perfect tool for small caps or fraction figures. But sometimes you just want to use ScaleFast on one or two glyphs, and for small jobs that it's like using a flamethrower to light a candle. That's where Transmutor comes in.
 
 Transmutor uses ScaleFast's underlying scaling-interpolating library called [MutatorScale](https://github.com/roboDocs/MutatorScale) (which, in turn, is built upon the OG interpolation library, [MutatorMath](https://github.com/LettError/MutatorMath) by [Erik van Blokland](https://github.com/letterror/)). It allows you to _transform_ and interpolate _("Mutate")_ glyphs in the glyph window, hence Trans-Mutator.
@@ -13,6 +15,8 @@ It goes beyond just scaling glyphs in a few seconds to make those annoying backl
 - Find us on [Mechanic2](https://robofontmechanic.com/) and install from there.
 
 ## Usage
+![Transmutor Window](images/ToolWindow.png)
+
 ### Tool Window
 1. Type your glyph name into this field here. The glyph needs to exist in all your sources. Speaking of which...
 2. Here are all the open fonts. Check the boxes next to the fonts you want to use as sources.

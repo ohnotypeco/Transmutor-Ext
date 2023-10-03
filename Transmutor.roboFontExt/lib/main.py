@@ -34,8 +34,9 @@ from mojo.UI import CurrentGlyphWindow, getDefault
 
 try:
     from mojo.UI import appearanceColorKey
+    is44 = True
 except ImportError:
-    pass
+    is44 = False
 
 try:
     import mutatorScale
@@ -49,9 +50,9 @@ finally:
 
 VERBOSE = False
 EXTENSION_IDENTIFIER = "co.ohnotype.Transmutor"
-VERSION = "0.1"
+VERSION = "0.1.0"
 
-TOOLBAR_ICON = AppKit.NSImage.alloc().initByReferencingFile_(os.path.join(os.getcwd(), "..", "resources", "icon.pdf"))
+TOOLBAR_ICON = AppKit.NSImage.alloc().initByReferencingFile_(os.path.join(os.getcwd(), "..", "resources", "tool.pdf"))
 
 
 def verbosePrint(s):
@@ -127,7 +128,7 @@ class TransmutorModel():
     @property
     def scaledGlyphColor(self):
         verbosePrint("TransmutorModel::scaledGlyphColor")
-        if version > "4.4":
+        if is44:
             return getDefault(appearanceColorKey("glyphViewTransformationColor"))
         else:
             return getDefault("glyphViewTransformationColor")
@@ -135,7 +136,7 @@ class TransmutorModel():
     @property
     def previewColor(self):
         verbosePrint("TransmutorModel::previewColor")
-        if version > "4.4":
+        if is44:
             return getDefault(appearanceColorKey("glyphViewPreviewFillColor"))
         else:
             return getDefault("glyphViewPreviewFillColor")
@@ -172,7 +173,6 @@ class TransmutorModel():
                 unScaledGlyph = self.scaler.getScaledGlyph(self.sourceGlyphName, stems)
                 originPt = (interpolate(unScaledGlyph.bounds[0], unScaledGlyph.bounds[2], self.transformOrigin[0]),
                             interpolate(unScaledGlyph.bounds[1], unScaledGlyph.bounds[3], self.transformOrigin[1]))
-                # move the glyph so the center is at (0,0)
                 unScaledGlyph.moveBy((-originPt[0], -originPt[1]))
                 self.unScaledGlyphBounds = unScaledGlyph.bounds
 
@@ -185,17 +185,10 @@ class TransmutorModel():
                 newGlyph = self.scaler.getScaledGlyph(self.sourceGlyphName, stems)
                 originPt = (interpolate(newGlyph.bounds[0], newGlyph.bounds[2], self.transformOrigin[0]),
                             interpolate(newGlyph.bounds[1], newGlyph.bounds[3], self.transformOrigin[1]))
-                # move the glyph so the center is at (0,0)
                 newGlyph.moveBy((-originPt[0], -originPt[1]))
                 self.scaledGlyphBounds = newGlyph.bounds
 
-                # self.offsetX += originPt[0]
-                # self.offsetY += originPt[1]
-
                 return newGlyph
-
-            else:
-                print("Source glyph cannot be the same as the current glyph.")
 
         return None
 
@@ -291,28 +284,28 @@ class TransmutorPanel(ezui.WindowController):
                 valueType="float",
                 value=1.0,
                 minValue=0.0,
-                maxValue=2.0,
+                maxValue=4.0,
                 tickMarks=5,
             ),
             stemWtRatioVSlider=dict(
                 valueType="float",
                 value=1.0,
                 minValue=0.0,
-                maxValue=2.0,
+                maxValue=4.0,
                 tickMarks=5,
             ),
             scaleHSlider=dict(
                 valueType="float",
                 value=1.0,
                 minValue=0.0,
-                maxValue=2.0,
+                maxValue=4.0,
                 tickMarks=5,
             ),
             scaleVSlider=dict(
                 valueType="float",
                 value=1.0,
                 minValue=0.0,
-                maxValue=2.0,
+                maxValue=4.0,
                 tickMarks=5,
             ),
         )
@@ -411,24 +404,28 @@ class TransmutorPanel(ezui.WindowController):
 
         self.controller.redrawView()
 
-    def scaleHSliderCallback(self, sender):
-        verbosePrint("TransmutorPanel::scaleHSliderCallback")
-        self.model.scaleH = float(sender.get())
-        self.controller.redrawView()
-
-    def scaleHSliderTextFieldCallback(self, sender):
-        verbosePrint("TransmutorPanel::scaleHSliderTextFieldCallback")
-        self.model.scaleH = float(sender.get())
-        self.controller.redrawView()
-
     def scaleVSliderCallback(self, sender):
         verbosePrint("TransmutorPanel::scaleVSliderCallback")
-        self.model.scaleV = float(sender.get())
+        scaleV = float(sender.get()) if float(sender.get()) > 0 else 0.0001
+        self.model.scaleV = scaleV
         self.controller.redrawView()
 
     def scaleVSliderTextFieldCallback(self, sender):
         verbosePrint("TransmutorPanel::scaleVSliderTextFieldCallback")
-        self.model.scaleV = float(sender.get())
+        scaleV = float(sender.get()) if float(sender.get()) > 0 else 0.0001
+        self.model.scaleV = scaleV
+        self.controller.redrawView()
+
+    def scaleHSliderCallback(self, sender):
+        verbosePrint("TransmutorPanel::scaleHSliderCallback")
+        scaleH = float(sender.get()) if float(sender.get()) > 0 else 0.0001
+        self.model.scaleH = scaleH
+        self.controller.redrawView()
+
+    def scaleHSliderTextFieldCallback(self, sender):
+        verbosePrint("TransmutorPanel::scaleHSliderTextFieldCallback")
+        scaleH = float(sender.get()) if float(sender.get()) > 0 else 0.0001
+        self.model.scaleH = scaleH
         self.controller.redrawView()
 
     def addToGlyphButtonCallback(self, sender):
@@ -517,18 +514,13 @@ class TransmutorToolController(BaseEventTool):
 
             self.active = False
 
-    def fontBecameCurrent(self):
+    def fontBecameCurrent(self, info):
         verbosePrint("Transmutor::fontBecameCurrent")
         if self.active == True:
             self.reset()
 
     def fontDidOpen(self):
         verbosePrint("Transmutor::fontDidOpen")
-        if self.active == True:
-            self.reset()
-
-    def viewDidChangeGlyph(self):
-        verbosePrint("Transmutor::viewDidChangeGlyph")
         if self.active == True:
             self.reset()
 
@@ -566,8 +558,8 @@ class TransmutorToolController(BaseEventTool):
                         self.clickAction = "interpolating"
                         if self.isDragging():
                             dampener = 200 * (1/CurrentGlyphWindow().getGlyphViewScale())
-                            altDragDistanceH = min(1, max(-1, (y - self.downPt[1])/dampener))
-                            altDragDistanceV = min(1, max(-1, (x - self.downPt[0])/dampener))
+                            altDragDistanceH = min(3, max(-1, (y - self.downPt[1])/dampener))
+                            altDragDistanceV = min(3, max(-1, (x - self.downPt[0])/dampener))
 
                             if not self.shiftDown:
                                 self.model.stemWtRatioH = altDragDistanceV + 1
@@ -657,8 +649,8 @@ class TransmutorToolController(BaseEventTool):
 
     def reset(self):
         verbosePrint("Transmutor::reset")
-        self.model.glyph = self.getGlyph()
-        self.model.currentFont = self.getGlyph().font
+        self.model.glyph = CurrentGlyph()
+        self.model.currentFont = CurrentFont()
         self.redrawView()
 
     def addToGlyph(self):
@@ -674,83 +666,84 @@ class TransmutorToolController(BaseEventTool):
 
         if self.model.sourceGlyphName:
             scaledGlyph = self.model.getScaledGlyph()
-
-            scaledGlyphLayer = self.foregroundContainer.appendPathSublayer(
-                fillColor=self.model.scaledGlyphColor,
-                strokeColor=None,
-                opacity=1
-            )
-            pen = scaledGlyphLayer.getPen()
-            scaledGlyph.draw(pen)
-
-            previewLayer = self.previewContainer.appendPathSublayer(
-                fillColor=self.model.previewColor,
-                strokeColor=None,
-                opacity=1,
-            )
-            pen = previewLayer.getPen()
-            scaledGlyph.draw(pen)
-
-            boxLayer = self.foregroundContainer.appendPathSublayer(
-                fillColor=None,
-                strokeColor=(1, 0, 0, 1),
-                strokeWidth=1,
-                name="box"
-            )
-            pen = boxLayer.getPen()
-            # bounds (x, y, w, h)
-            pen.moveTo((self.model.scaledGlyphBounds[0], self.model.scaledGlyphBounds[1]))
-            pen.lineTo((self.model.scaledGlyphBounds[2], self.model.scaledGlyphBounds[1]))
-            pen.lineTo((self.model.scaledGlyphBounds[2], self.model.scaledGlyphBounds[3]))
-            pen.lineTo((self.model.scaledGlyphBounds[0], self.model.scaledGlyphBounds[3]))
-            pen.closePath()
-            boxLayer.setStrokeDash((5, 5))
-
-            handleSize = 10
-
-            swHandleLayer = self.foregroundContainer.appendSymbolSublayer(
-                position=(self.model.scaledGlyphBounds[0], self.model.scaledGlyphBounds[1]),
-                imageSettings=dict(
-                    name="rectangle",
-                    size=(handleSize, handleSize),
-                    fillColor=(1, 0, 0, 1)
+            
+            if scaledGlyph is not None:
+                scaledGlyphLayer = self.foregroundContainer.appendPathSublayer(
+                    fillColor=self.model.scaledGlyphColor,
+                    strokeColor=None,
+                    opacity=0.5
                 )
-            )
+                pen = scaledGlyphLayer.getPen()
+                scaledGlyph.draw(pen)
 
-            seHandleLayer = self.foregroundContainer.appendSymbolSublayer(
-                position=(self.model.scaledGlyphBounds[2], self.model.scaledGlyphBounds[1]),
-                imageSettings=dict(
-                    name="rectangle",
-                    size=(handleSize, handleSize),
-                    fillColor=(1, 0, 0, 1)
+                previewLayer = self.previewContainer.appendPathSublayer(
+                    fillColor=self.model.previewColor,
+                    strokeColor=None,
+                    opacity=1,
                 )
-            )
+                pen = previewLayer.getPen()
+                scaledGlyph.draw(pen)
 
-            neHandleLayer = self.foregroundContainer.appendSymbolSublayer(
-                position=(self.model.scaledGlyphBounds[2], self.model.scaledGlyphBounds[3]),
-                imageSettings=dict(
-                    name="rectangle",
-                    size=(handleSize, handleSize),
-                    fillColor=(1, 0, 0, 1)
+                boxLayer = self.foregroundContainer.appendPathSublayer(
+                    fillColor=None,
+                    strokeColor=(1, 0, 0, 1),
+                    strokeWidth=1,
+                    name="box"
                 )
-            )
+                pen = boxLayer.getPen()
+                # bounds (x, y, w, h)
+                pen.moveTo((self.model.scaledGlyphBounds[0], self.model.scaledGlyphBounds[1]))
+                pen.lineTo((self.model.scaledGlyphBounds[2], self.model.scaledGlyphBounds[1]))
+                pen.lineTo((self.model.scaledGlyphBounds[2], self.model.scaledGlyphBounds[3]))
+                pen.lineTo((self.model.scaledGlyphBounds[0], self.model.scaledGlyphBounds[3]))
+                pen.closePath()
+                boxLayer.setStrokeDash((5, 5))
 
-            nwHandleLayer = self.foregroundContainer.appendSymbolSublayer(
-                position=(self.model.scaledGlyphBounds[0], self.model.scaledGlyphBounds[3]),
-                imageSettings=dict(
-                    name="rectangle",
-                    size=(handleSize, handleSize),
-                    fillColor=(1, 0, 0, 1)
+                handleSize = 10
+
+                swHandleLayer = self.foregroundContainer.appendSymbolSublayer(
+                    position=(self.model.scaledGlyphBounds[0], self.model.scaledGlyphBounds[1]),
+                    imageSettings=dict(
+                        name="rectangle",
+                        size=(handleSize, handleSize),
+                        fillColor=self.model.scaledGlyphColor
+                    )
                 )
-            )
 
-            scaledGlyphLayer.addTranslationTransformation((self.model.offsetX, self.model.offsetY))
-            previewLayer.addTranslationTransformation((self.model.offsetX, self.model.offsetY))
-            boxLayer.addTranslationTransformation((self.model.offsetX, self.model.offsetY))
-            swHandleLayer.addTranslationTransformation((self.model.offsetX, self.model.offsetY))
-            seHandleLayer.addTranslationTransformation((self.model.offsetX, self.model.offsetY))
-            neHandleLayer.addTranslationTransformation((self.model.offsetX, self.model.offsetY))
-            nwHandleLayer.addTranslationTransformation((self.model.offsetX, self.model.offsetY))
+                seHandleLayer = self.foregroundContainer.appendSymbolSublayer(
+                    position=(self.model.scaledGlyphBounds[2], self.model.scaledGlyphBounds[1]),
+                    imageSettings=dict(
+                        name="rectangle",
+                        size=(handleSize, handleSize),
+                        fillColor=self.model.scaledGlyphColor
+                    )
+                )
+
+                neHandleLayer = self.foregroundContainer.appendSymbolSublayer(
+                    position=(self.model.scaledGlyphBounds[2], self.model.scaledGlyphBounds[3]),
+                    imageSettings=dict(
+                        name="rectangle",
+                        size=(handleSize, handleSize),
+                        fillColor=self.model.scaledGlyphColor
+                    )
+                )
+
+                nwHandleLayer = self.foregroundContainer.appendSymbolSublayer(
+                    position=(self.model.scaledGlyphBounds[0], self.model.scaledGlyphBounds[3]),
+                    imageSettings=dict(
+                        name="rectangle",
+                        size=(handleSize, handleSize),
+                        fillColor=self.model.scaledGlyphColor
+                    )
+                )
+
+                scaledGlyphLayer.addTranslationTransformation((self.model.offsetX, self.model.offsetY))
+                previewLayer.addTranslationTransformation((self.model.offsetX, self.model.offsetY))
+                boxLayer.addTranslationTransformation((self.model.offsetX, self.model.offsetY))
+                swHandleLayer.addTranslationTransformation((self.model.offsetX, self.model.offsetY))
+                seHandleLayer.addTranslationTransformation((self.model.offsetX, self.model.offsetY))
+                neHandleLayer.addTranslationTransformation((self.model.offsetX, self.model.offsetY))
+                nwHandleLayer.addTranslationTransformation((self.model.offsetX, self.model.offsetY))
 
         self.toolPanel.refreshFromModel()
 
