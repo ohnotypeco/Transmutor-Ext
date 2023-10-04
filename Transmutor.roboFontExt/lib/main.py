@@ -53,7 +53,7 @@ finally:
 
 VERBOSE = False
 EXTENSION_IDENTIFIER = "co.ohnotype.Transmutor"
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 TOOLBAR_ICON = AppKit.NSImage.alloc().initByReferencingFile_(os.path.join(os.getcwd(), "..", "resources", "tool.pdf"))
 
