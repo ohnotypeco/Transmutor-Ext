@@ -32,6 +32,9 @@ from mojo.events import BaseEventTool, installTool
 from mojo.roboFont import version
 from mojo.UI import CurrentGlyphWindow, getDefault
 
+from mojo.tools import IntersectGlyphWithLine as intersect
+import math
+
 try:
     from mojo.UI import appearanceColorKey
     is44 = True
@@ -91,6 +94,9 @@ def cache(function):
             _memoizeCache[key] = result
             return result
     return wrapper
+
+def distance(p1, p2):
+    return round(math.sqrt((p1[0]-p2[0])**2 + (p1[1]-p2[1])**2),2)
 
 
 def interpolate(a, b, v):
@@ -736,6 +742,57 @@ class TransmutorToolController(BaseEventTool):
                         fillColor=self.model.scaledGlyphColor
                     )
                 )
+
+                # show measurments from currentGlyph
+                measurements = self.model.currentGlyph.naked().measurements
+                tempScaledGlyph = self.model.getScaledGlyph()
+                tempScaledGlyph.moveBy((self.model.offsetX, self.model.offsetY))
+
+                for m in measurements:
+                    if m.startPoint and m.endPoint:
+                        sx, sy = m.startPoint
+                        ex, ey = m.endPoint
+                        l = (sx,sy), (ex,ey)    
+                        i = sorted(intersect(tempScaledGlyph, l))
+                        inters = [i[ii:ii+2] for ii in range(0, len(i), 2-1)]
+                        for coords in inters:
+                            if len(coords) == 2:
+                                front, back = coords
+                                self.foregroundContainer.appendLineSublayer(
+                                   startPoint=front,
+                                   endPoint=back,
+                                   strokeWidth=1,
+                                   strokeColor=(1,0,0,.3)
+                                )
+                                self.foregroundContainer.appendSymbolSublayer(
+                                    position=front,
+                                    imageSettings=dict(
+                                        name="oval",
+                                        size=(10,10),
+                                        fillColor=(1,0,0,1)
+                                    )
+                                )
+                                self.foregroundContainer.appendSymbolSublayer(
+                                    position=back,
+                                    imageSettings=dict(
+                                        name="oval",
+                                        size=(10,10),
+                                        fillColor=(1,0,0,1)
+                                    )
+                                )
+                                xM = interpolate(front[0],back[0],.5)
+                                yM = interpolate(front[1],back[1],.5)
+                                self.foregroundContainer.appendTextLineSublayer(
+                                    position=(xM,yM),
+                                    size=(20, 20),
+                                    pointSize=8,
+                                    weight="bold",
+                                    text=f"{distance(front,back)}",
+                                    fillColor=(1,0,0,1),
+                                    horizontalAlignment="center",
+                                    verticalAlignment="center",
+                                )
+
 
                 scaledGlyphLayer.addTranslationTransformation((self.model.offsetX, self.model.offsetY))
                 previewLayer.addTranslationTransformation((self.model.offsetX, self.model.offsetY))
