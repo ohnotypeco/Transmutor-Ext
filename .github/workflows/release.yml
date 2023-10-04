@@ -25,9 +25,17 @@ jobs:
           echo "RELEASE_VERSION=${GITHUB_REF#refs/*/}" >> $GITHUB_ENV
       - name: Relative Zip
         run: |
-          ${GITHUB_WORKSPACE}/.github/relativeZip.sh "${GITHUB_WORKSPACE}/Transmutor.roboFontExt" "${GITHUB_WORKSPACE}/Transmutor-${RELEASE_VERSION}.roboFontExt.zip"
+          zip -r - "${GITHUB_WORKSPACE}/Transmutor.roboFontExt" > "${GITHUB_WORKSPACE}/Transmutor.roboFontExt.zip"
       - name: Release
         uses: softprops/action-gh-release@v1
         with:
+          files: |
+            *.zip
+      - name: Release
+        uses: softprops/action-gh-release@v1
+        with:
+          name: Latest
+          body: |
+            Latest release v${RELEASE_VERSION}
           files: |
             *.zip

@@ -36,5 +36,8 @@ It goes beyond just scaling glyphs in a few seconds to make those annoying backl
 - [Frederik Berlaen](https://github.com/typemytype/) and [Tal Leming](https://github.com/typesupply/) for RoboFont, EZUI, and Merz, and for their help in understanding those amazing tools.
 - [Ryan Bugden](https://github.com/ryanbugden) and [Connor Davenport](https://github.com/connordavenport) for responding to all my Discord questions so quickly!
 
+## Contributing
+- If you have any questions, comments, or suggestions, please [open an issue](https://github.com/ohnotypeco/Transmutor-Ext/issues). 
+- Please note if you are cloning this repo, there is a submodule for MutatorScale, see [Working with Submodules](https://github.blog/2016-02-01-working-with-submodules/). When pulling changes, you may need to run `git submodule update --init --recursive` to get the latest version of MutatorScale.
 
 
