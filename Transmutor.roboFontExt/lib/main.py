@@ -148,6 +148,14 @@ class TransmutorModel():
             return getDefault("glyphViewPreviewFillColor")
 
     @property
+    def textColor(self):
+        verbosePrint("TransmutorModel::textColor")
+        if is44:
+            return getDefault(appearanceColorKey("glyphViewMeasurementsTextColor"))
+        else:
+            return getDefault("glyphViewMeasurementsTextColor")
+
+    @property
     def use45Constraint(self):
         verbosePrint("TransmutorModel::use45Constraint")
         return getDefault("glyphViewShouldUse45Contrain", True)
@@ -692,7 +700,7 @@ class TransmutorToolController(BaseEventTool):
 
                 boxLayer = self.foregroundContainer.appendPathSublayer(
                     fillColor=None,
-                    strokeColor=(1, 0, 0, 1),
+                    strokeColor=self.model.scaledGlyphColor,
                     strokeWidth=1,
                     name="box"
                 )
@@ -743,41 +751,42 @@ class TransmutorToolController(BaseEventTool):
                     )
                 )
 
-                # show measurments from currentGlyph
+                # show measurements from currentGlyph
                 measurements = self.model.currentGlyph.naked().measurements
-                tempScaledGlyph = self.model.getScaledGlyph()
-                tempScaledGlyph.moveBy((self.model.offsetX, self.model.offsetY))
 
                 for m in measurements:
                     if m.startPoint and m.endPoint:
                         sx, sy = m.startPoint
                         ex, ey = m.endPoint
+                        
+                        sx -= self.model.offsetX
+                        sy -= self.model.offsetY
+                        ex -= self.model.offsetX
+                        ey -= self.model.offsetY
+                        
                         l = (sx,sy), (ex,ey)    
-                        i = sorted(intersect(tempScaledGlyph, l))
+                        i = sorted(intersect(scaledGlyph, l))
                         inters = [i[ii:ii+2] for ii in range(0, len(i), 2-1)]
                         for coords in inters:
                             if len(coords) == 2:
                                 front, back = coords
-                                self.foregroundContainer.appendLineSublayer(
-                                   startPoint=front,
-                                   endPoint=back,
-                                   strokeWidth=1,
-                                   strokeColor=(1,0,0,.3)
-                                )
+                                front = front[0] + self.model.offsetX, front[1] + self.model.offsetY
+                                back = back[0] + self.model.offsetX, back[1] + self.model.offsetY
+       
                                 self.foregroundContainer.appendSymbolSublayer(
                                     position=front,
                                     imageSettings=dict(
                                         name="oval",
-                                        size=(10,10),
-                                        fillColor=(1,0,0,1)
+                                        size=(handleSize*0.5,handleSize*0.5),
+                                        fillColor=self.model.scaledGlyphColor
                                     )
                                 )
                                 self.foregroundContainer.appendSymbolSublayer(
                                     position=back,
                                     imageSettings=dict(
                                         name="oval",
-                                        size=(10,10),
-                                        fillColor=(1,0,0,1)
+                                        size=(handleSize*0.5,handleSize*0.5),
+                                        fillColor=self.model.scaledGlyphColor
                                     )
                                 )
                                 xM = interpolate(front[0],back[0],.5)
@@ -788,7 +797,7 @@ class TransmutorToolController(BaseEventTool):
                                     pointSize=8,
                                     weight="bold",
                                     text=f"{distance(front,back)}",
-                                    fillColor=(1,0,0,1),
+                                    fillColor=self.model.textColor,
                                     horizontalAlignment="center",
                                     verticalAlignment="center",
                                 )
