@@ -31,11 +31,3 @@ jobs:
         with:
           files: |
             *.zip
-      - name: Release
-        uses: softprops/action-gh-release@v1
-        with:
-          name: Latest
-          body: |
-            Latest release v${RELEASE_VERSION}
-          files: |
-            *.zip
