@@ -202,7 +202,7 @@ class TransmutorModel():
                 self.unScaledGlyphBounds = unScaledGlyph.bounds
 
                 self.scaler.set({
-                    "width": self.scaleH,
+                    "width": self.scaleH/self.scaleV,
                     "targetHeight": self.currentFont.info.unitsPerEm * self.scaleV,
                     "referenceHeight": self.currentFont.info.unitsPerEm,
                 })
@@ -430,8 +430,8 @@ class TransmutorToolController(Subscriber, ezui.WindowController):
         verbosePrint("TransmutorToolController::addToGlyph")
         scaledGlyph = self.model.getScaledGlyph()
         scaledGlyph.moveBy((self.model.offsetX, self.model.offsetY))
-        with self.getGlyph().undo("Transmutor"):
-            self.getGlyph().appendGlyph(scaledGlyph)
+        with self.model.currentGlyph.undo("Transmutor"):
+            self.model.currentGlyph.appendGlyph(scaledGlyph)
 
     def refreshFromModel(self):
         verbosePrint("TransmutorToolController::refreshFromModel")
@@ -989,18 +989,26 @@ class TransmutorToolController(Subscriber, ezui.WindowController):
                                     scaleV = self.model.scaleV
                                 else:
                                     scaleV = currentDistanceV/totalDistanceV
-
+                                    
                                 if not totalDistanceH:
-                                    scaleH = 1/scaleV  # TODO: This math is not right
+                                    scaleH = self.model.scaleH
                                 else:
-                                    # ScaleH is either 1, meaning it is scaling in proportion to V, or it is the percent of the drag distance of the total distance
                                     if not self.shiftDown:
-                                        if scaleV:
-                                            scaleH = (currentDistanceH/totalDistanceH)/scaleV
-                                        else:
-                                            scaleH = (currentDistanceH/totalDistanceH)
+                                        scaleH = currentDistanceH/totalDistanceH
                                     else:
-                                        scaleH = 1.0
+                                        scaleH = scaleV
+
+                                # if not totalDistanceH:
+                                #     scaleH = 1/scaleV  # TODO: This math is not right
+                                # else:
+                                #     # ScaleH is either 1, meaning it is scaling in proportion to V, or it is the percent of the drag distance of the total distance
+                                #     if not self.shiftDown:
+                                #         if scaleV:
+                                #             scaleH = (currentDistanceH/totalDistanceH)/scaleV
+                                #         else:
+                                #             scaleH = (currentDistanceH/totalDistanceH)
+                                #     else:
+                                #         scaleH = 1.0
 
                                 self.model.scaleV = scaleV
                                 self.model.scaleH = scaleH
