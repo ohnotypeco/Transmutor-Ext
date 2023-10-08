@@ -3,7 +3,15 @@
 <plist version="1.0">
 <dict>
 	<key>addToMenu</key>
-	<array>
+<array>
+		<dict>
+			<key>path</key>
+			<string>main.py</string>
+			<key>preferredName</key>
+			<string>Transmutor</string>
+			<key>shortKey</key>
+			<string></string>
+		</dict>
 	</array>
 	<key>developer</key>
 	<string>OH no Type Co.</string>
@@ -12,9 +20,9 @@
 	<key>html</key>
 	<false/>
 	<key>launchAtStartUp</key>
-	<true/>
+	<false/>
 	<key>mainScript</key>
-	<string>main.py</string>
+	<string></string>
 	<key>name</key>
 	<string>Transmutor</string>
 	<key>requiresVersionMajor</key>
