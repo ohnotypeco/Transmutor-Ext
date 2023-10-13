@@ -28,22 +28,12 @@ import os
 import site
 from copy import deepcopy
 
-import AppKit
 import ezui
-from mojo.events import getActiveEventTool
+from mojo.events import EditingTool, getActiveEventTool
 from mojo.roboFont import version
-from mojo.events import EditingTool
 from mojo.subscriber import Subscriber, registerRoboFontSubscriber
 from mojo.tools import IntersectGlyphWithLine as intersect
 from mojo.UI import CurrentGlyphWindow, getDefault
-
-from pprint import pprint
-
-try:
-    from mojo.UI import appearanceColorKey
-    is44 = True
-except ImportError:
-    is44 = False
 
 try:
     import mutatorScale
@@ -58,9 +48,6 @@ finally:
 VERBOSE = False
 EXTENSION_IDENTIFIER = "co.ohnotype.Transmutor"
 VERSION = "2.0.1"
-
-TOOLBAR_ICON = AppKit.NSImage.alloc().initByReferencingFile_(os.path.join(os.getcwd(), "..", "resources", "tool.pdf"))
-
 
 def verbosePrint(s):
     if VERBOSE:
@@ -122,6 +109,9 @@ def norm(v, a, b):
 def getRefStemsCached(font):
     return getRefStems(font)
 
+@cache
+def makeListFontNameCached(font):
+    return makeListFontName(font)
 
 class TransmutorModel():
     currentGlyph = None
@@ -145,31 +135,22 @@ class TransmutorModel():
     @property
     def scaledGlyphColor(self):
         verbosePrint("TransmutorModel::scaledGlyphColor")
-        if is44:
-            return getDefault(appearanceColorKey("glyphViewTransformationColor"))
-        else:
-            return getDefault("glyphViewTransformationColor")
+        return getDefault("glyphViewTransformationColor")
 
     @property
     def previewColor(self):
         verbosePrint("TransmutorModel::previewColor")
-        if is44:
-            return getDefault(appearanceColorKey("glyphViewPreviewFillColor"))
-        else:
-            return getDefault("glyphViewPreviewFillColor")
+        return getDefault("glyphViewPreviewFillColor")
 
     @property
     def textColor(self):
         verbosePrint("TransmutorModel::textColor")
-        if is44:
-            return getDefault(appearanceColorKey("glyphViewMeasurementsTextColor"))
-        else:
-            return getDefault("glyphViewMeasurementsTextColor")
+        return getDefault("glyphViewMeasurementsTextColor")
 
     @property
     def use45Constraint(self):
         verbosePrint("TransmutorModel::use45Constraint")
-        return getDefault("glyphViewShouldUse45Contrain", True)
+        return getDefault("glyphViewShouldUse45Contrain")
 
     def updateScaler(self):
         if self.allFonts:
@@ -179,7 +160,7 @@ class TransmutorModel():
         verbosePrint("TransmutorModel::getScaledGlyph")
         if self.currentFont is not None and self.currentGlyph is not None:
             if self.sourceGlyphName != self.currentGlyph.name and self.sourceGlyphName in self.currentFont.keys():
-                currentFontName = makeListFontName(self.currentFont)
+                currentFontName = makeListFontNameCached(self.currentFont)
                 if currentFontName in self.scaler.masters:
                     stems = (self.scaler.masters[currentFontName].vstem * self.stemWtRatioV,
                              self.scaler.masters[currentFontName].hstem * self.stemWtRatioH)
@@ -261,6 +242,7 @@ class TransmutorToolController(Subscriber, ezui.WindowController):
         ---X--- [__]                @scaleVSlider
         : Width:
         ---X--- [__]                @scaleHSlider
+        [X] Constrain               @constrainScaleSwitch
         
         =======================
         (Add to Current Glyph)   @addToGlyphButton
@@ -354,12 +336,17 @@ class TransmutorToolController(Subscriber, ezui.WindowController):
 
         self.stemWtRatioVSlider = self.w.getItem("stemWtRatioVSlider")
         self.stemWtRatioHSlider = self.w.getItem("stemWtRatioHSlider")
+        self.constrainStemWtRatioSwitch = self.w.getItem("constrainStemWtRatioSwitch")
 
         self.stemWtRatioHSlider.enable(False)
+        
+        self.scaleVSlider = self.w.getItem("scaleVSlider")
+        self.scaleHSlider = self.w.getItem("scaleHSlider")
+        self.constrainScaleSwitch = self.w.getItem("constrainScaleSwitch")
 
-        self.constrainSwitch = self.w.getItem("constrainStemWtRatioSwitch")
+        self.scaleHSlider.enable(False)
 
-        self.w.setDefaultButton(self.w.getItem("addToGlyphButton"))
+        # self.w.setDefaultButton(self.w.getItem("addToGlyphButton"))
 
     def started(self):
         verbosePrint("TransmutorToolController::started")
@@ -379,12 +366,16 @@ class TransmutorToolController(Subscriber, ezui.WindowController):
                 self.previewContainer.setVisible(True)
 
                 self.model = TransmutorModel()
+                
+                # self.model.setInitialActive()
 
                 self.active = True
+                self.userHasMovedGlyph = False
 
                 self.reset()
 
                 self.w.open()
+                self.w.getNSWindow().makeKeyWindow()
 
     def destroy(self):
         verbosePrint("TransmutorToolController::destroy")
@@ -413,23 +404,22 @@ class TransmutorToolController(Subscriber, ezui.WindowController):
         self.model.currentFont = CurrentFont()
         self.model.currentGlyph = CurrentGlyph()
         self.model.allFonts = [font for font in AllFonts(sortOptions=["magic"])]
-        active = []
-        for f in self.model.allFonts:
-            if f in self.model.activeFonts or f.info.familyName != None:
-                active.append(f)
-        self.model.activeFonts = active
+        self.model.activeFonts = [font for font in self.model.allFonts if font.info.familyName]
 
         self.model.updateScaler()
         self.redrawView()
 
     def clearSelection(self):
         self.model.currentGlyph.selectedContours = ()
+        self.model.currentGlyph.selectedComponents = ()
+        self.model.currentGlyph.selectedAnchors = ()
         # self.model.currentGlyph.changed()
 
     def addToGlyph(self):
         verbosePrint("TransmutorToolController::addToGlyph")
         scaledGlyph = self.model.getScaledGlyph()
         scaledGlyph.moveBy((self.model.offsetX, self.model.offsetY))
+        scaledGlyph.round()
         with self.model.currentGlyph.undo("Transmutor"):
             self.model.currentGlyph.appendGlyph(scaledGlyph)
 
@@ -443,12 +433,12 @@ class TransmutorToolController(Subscriber, ezui.WindowController):
 
         if len(self.w.getItemValue("sourceFontTable")) > 0:
             self.w.getItem("sourceFontTable").set([])
-
+            
         for font in self.model.allFonts:
             vStem, hStem = getRefStemsCached(font)
             self.w.getItem("sourceFontTable").appendItems([{
-                "selected": font in self.model.activeFonts,
-                "font": makeListFontName(font),
+                "selected": (font in self.model.activeFonts),
+                "font": makeListFontNameCached(font),
                 "vStem": vStem,
                 "hStem": hStem,
             }])
@@ -638,7 +628,7 @@ class TransmutorToolController(Subscriber, ezui.WindowController):
     def glyphNamesTextBoxCallback(self, sender):
         verbosePrint("TransmutorToolController::glyphNamesTextBoxCallback")
         self.model.sourceGlyphName = sender.get()
-        if self.model.offsetX == None and self.model.offsetY == None:
+        if not self.userHasMovedGlyph and self.model.sourceGlyphName in self.model.currentFont.keys():
             self.model.offsetX = interpolate(
                 self.model.currentFont[self.model.sourceGlyphName].bounds[0],
                 self.model.currentFont[self.model.sourceGlyphName].bounds[2],
@@ -665,7 +655,7 @@ class TransmutorToolController(Subscriber, ezui.WindowController):
 
     def stemWtRatioVSliderCallback(self, sender):
         verbosePrint("TransmutorToolController::stemWtRatioVSliderCallback")
-        if self.constrainSwitch.get():
+        if self.constrainStemWtRatioSwitch.get():
             self.model.stemWtRatioV = float(sender.get())
             self.model.stemWtRatioH = float(sender.get())
             self.stemWtRatioHSlider.set(float(sender.get()))
@@ -676,7 +666,7 @@ class TransmutorToolController(Subscriber, ezui.WindowController):
 
     def stemWtRatioVSliderTextFieldCallback(self, sender):
         verbosePrint("TransmutorToolController::stemWtRatioVSliderTextFieldCallback")
-        if self.constrainSwitch.get():
+        if self.constrainStemWtRatioSwitch.get():
             self.model.stemWtRatioV = float(sender.get())
             self.model.stemWtRatioH = float(sender.get())
             self.stemWtRatioHSlider.set(float(sender.get()))
@@ -697,7 +687,7 @@ class TransmutorToolController(Subscriber, ezui.WindowController):
 
     def constrainStemWtRatioSwitchCallback(self, sender):
         verbosePrint("TransmutorToolController::constrainStemWtRatioSwitchCallback")
-        if self.constrainSwitch.get():
+        if self.constrainStemWtRatioSwitch.get():
             self.stemWtRatioHSlider.enable(False)
             self.stemWtRatioHSlider.set(float(self.stemWtRatioVSlider.get()))
         else:
@@ -707,14 +697,20 @@ class TransmutorToolController(Subscriber, ezui.WindowController):
 
     def scaleVSliderCallback(self, sender):
         verbosePrint("TransmutorToolController::scaleVSliderCallback")
-        scaleV = float(sender.get()) if float(sender.get()) > 0 else 0.0001
-        self.model.scaleV = scaleV
+        self.model.scaleV = float(sender.get())
+        if self.constrainScaleSwitch.get():
+            self.model.scaleH = float(sender.get()) if float(sender.get()) > 0 else 0.0001
+            self.scaleHSlider.set(float(sender.get()))
+
         self.redrawView()
 
     def scaleVSliderTextFieldCallback(self, sender):
         verbosePrint("TransmutorToolController::scaleVSliderTextFieldCallback")
-        scaleV = float(sender.get()) if float(sender.get()) > 0 else 0.0001
-        self.model.scaleV = scaleV
+        self.model.scaleV = float(sender.get())
+        if self.constrainScaleSwitch.get():
+            self.model.scaleH = float(sender.get()) if float(sender.get()) > 0 else 0.0001
+            self.scaleHSlider.set(float(sender.get()))
+
         self.redrawView()
 
     def scaleHSliderCallback(self, sender):
@@ -727,6 +723,16 @@ class TransmutorToolController(Subscriber, ezui.WindowController):
         verbosePrint("TransmutorToolController::scaleHSliderTextFieldCallback")
         scaleH = float(sender.get()) if float(sender.get()) > 0 else 0.0001
         self.model.scaleH = scaleH
+        self.redrawView()
+        
+    def constrainScaleSwitchCallback(self, sender):
+        verbosePrint("TransmutorToolController::constrainScaleSwitchCallback")
+        if self.constrainScaleSwitch.get():
+            self.scaleHSlider.enable(False)
+            self.scaleHSlider.set(float(self.scaleVSlider.get()))
+        else:
+            self.scaleHSlider.enable(True)
+
         self.redrawView()
 
     def addToGlyphButtonCallback(self, sender):
@@ -760,6 +766,12 @@ class TransmutorToolController(Subscriber, ezui.WindowController):
         verbosePrint("TransmutorToolController::glyphEditorDidSetGlyph")
         if self.active == True:
             self.reset()
+            
+    def glyphEditorDidKeyDown(self, info):
+        verbosePrint("TransmutorToolController::glyphEditorDidKeyDown")
+        if self.active == True:
+            if info["NSEvent"].keyCode() == 53:
+                self.w.close()
 
     # Mouse Events
     #############################################################
@@ -774,8 +786,7 @@ class TransmutorToolController(Subscriber, ezui.WindowController):
             self.isDragging = False
             self._leftMouseAction(point)
 
-    glyphEditorDidMouseDragDelay = 0
-
+    # glyphEditorDidMouseDragDelay = 0
     def glyphEditorDidMouseDrag(self, info):
         verbosePrint("TransmutorToolController::glyphEditorDidMouseDrag")
         if self.active:
@@ -797,6 +808,11 @@ class TransmutorToolController(Subscriber, ezui.WindowController):
         verbosePrint("TransmutorToolController::glyphEditorDidChangeModifiers")
         self.optionDown = bool(info["deviceState"]["optionDown"])
         self.shiftDown = bool(info["deviceState"]["shiftDown"])
+        
+    def _ptOnHandle(self, point, handle):
+        hitSize = 10 * (1/CurrentGlyphWindow().getGlyphViewScale())
+        return handle[0]-hitSize+self.model.offsetX < point[0] < handle[0]+hitSize+self.model.offsetX and handle[1]-hitSize+self.model.offsetY < point[1] < handle[1]+hitSize+self.model.offsetY
+
 
     def _leftMouseAction(self, point, delta=None):
         verbosePrint("TransmutorToolController::_leftMouseAction")
@@ -813,14 +829,9 @@ class TransmutorToolController(Subscriber, ezui.WindowController):
                     # if there is a downPt, i.e. it is not a mouseUp action
                     if not self.isDragging:
                         # if the mouse is not dragging, i.e. it is a mouseDown action, figure out where the click happened
-                        hitSize = 20 * (1/CurrentGlyphWindow().getGlyphViewScale())
                         self.corner = None
                         self.clickX = 0
                         self.clickY = 0
-
-                        # TODO: Add N, S, E, W handles as well, and DRY this up
-                        def ptOnHandle(point, handle):
-                            return handle[0]-hitSize+self.model.offsetX < point[0] < handle[0]+hitSize+self.model.offsetX and handle[1]-hitSize+self.model.offsetY < point[1] < handle[1]+hitSize+self.model.offsetY
 
                         if ptOnHandle(point, (scaledGlyph.bounds[0], scaledGlyph.bounds[1])):
                             # SW Corner
@@ -957,6 +968,7 @@ class TransmutorToolController(Subscriber, ezui.WindowController):
                                 self.clickAction = "interpolating"
                             else:
                                 self.clickAction = "moving"
+                                self.userHasMovedGlyph = True
                                 self.clickX = self.downPt[0] - self.model.offsetX
                                 self.clickY = self.downPt[1] - self.model.offsetY
                         else:
@@ -997,18 +1009,6 @@ class TransmutorToolController(Subscriber, ezui.WindowController):
                                         scaleH = currentDistanceH/totalDistanceH
                                     else:
                                         scaleH = scaleV
-
-                                # if not totalDistanceH:
-                                #     scaleH = 1/scaleV  # TODO: This math is not right
-                                # else:
-                                #     # ScaleH is either 1, meaning it is scaling in proportion to V, or it is the percent of the drag distance of the total distance
-                                #     if not self.shiftDown:
-                                #         if scaleV:
-                                #             scaleH = (currentDistanceH/totalDistanceH)/scaleV
-                                #         else:
-                                #             scaleH = (currentDistanceH/totalDistanceH)
-                                #     else:
-                                #         scaleH = 1.0
 
                                 self.model.scaleV = scaleV
                                 self.model.scaleH = scaleH
