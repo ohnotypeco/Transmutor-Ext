@@ -1,5 +1,7 @@
 #!/bin/bash
 
+# Use: ./release.sh [major|minor|patch]
+
 # Exit immediately if a command exits with a non-zero status.
 set -e
 
