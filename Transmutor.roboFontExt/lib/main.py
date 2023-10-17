@@ -47,7 +47,7 @@ finally:
 
 VERBOSE = False
 EXTENSION_IDENTIFIER = "co.ohnotype.Transmutor"
-VERSION = "2.0.2"
+VERSION = "2.0.3"
 
 def verbosePrint(s):
     if VERBOSE:
