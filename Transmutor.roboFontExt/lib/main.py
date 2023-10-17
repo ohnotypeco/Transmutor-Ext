@@ -813,7 +813,6 @@ class TransmutorToolController(Subscriber, ezui.WindowController):
         hitSize = 10 * (1/CurrentGlyphWindow().getGlyphViewScale())
         return handle[0]-hitSize+self.model.offsetX < point[0] < handle[0]+hitSize+self.model.offsetX and handle[1]-hitSize+self.model.offsetY < point[1] < handle[1]+hitSize+self.model.offsetY
 
-
     def _leftMouseAction(self, point, delta=None):
         verbosePrint("TransmutorToolController::_leftMouseAction")
         if self.active:
@@ -833,7 +832,7 @@ class TransmutorToolController(Subscriber, ezui.WindowController):
                         self.clickX = 0
                         self.clickY = 0
 
-                        if ptOnHandle(point, (scaledGlyph.bounds[0], scaledGlyph.bounds[1])):
+                        if self._ptOnHandle(point, (scaledGlyph.bounds[0], scaledGlyph.bounds[1])):
                             # SW Corner
                             getActiveEventTool().__class__.canSelectWithMarque = disable
                             self.corner = (0.0, 0.0)
@@ -849,7 +848,7 @@ class TransmutorToolController(Subscriber, ezui.WindowController):
                                                                                  self.model.transformOrigin[1])
                             self.model.transformOrigin = (1.0, 1.0)
                             self.clickAction = "scaling"
-                        elif ptOnHandle(point, (interpolate(scaledGlyph.bounds[0], scaledGlyph.bounds[2], 0.5), scaledGlyph.bounds[1])):
+                        elif self._ptOnHandle(point, (interpolate(scaledGlyph.bounds[0], scaledGlyph.bounds[2], 0.5), scaledGlyph.bounds[1])):
                             # S center
                             getActiveEventTool().__class__.canSelectWithMarque = disable
                             self.corner = (0.5, 0.0)
@@ -865,7 +864,7 @@ class TransmutorToolController(Subscriber, ezui.WindowController):
                                                                                  self.model.transformOrigin[1])
                             self.model.transformOrigin = (0.5, 1.0)
                             self.clickAction = "scaling"
-                        elif ptOnHandle(point, (scaledGlyph.bounds[2], scaledGlyph.bounds[1])):
+                        elif self._ptOnHandle(point, (scaledGlyph.bounds[2], scaledGlyph.bounds[1])):
                             # SE Corner
                             getActiveEventTool().__class__.canSelectWithMarque = disable
                             self.corner = (1.0, 0.0)
@@ -881,7 +880,7 @@ class TransmutorToolController(Subscriber, ezui.WindowController):
                                                                                  self.model.transformOrigin[1])
                             self.model.transformOrigin = (0.0, 1.0)
                             self.clickAction = "scaling"
-                        elif ptOnHandle(point, (scaledGlyph.bounds[2], interpolate(scaledGlyph.bounds[1], scaledGlyph.bounds[3], 0.5))):
+                        elif self._ptOnHandle(point, (scaledGlyph.bounds[2], interpolate(scaledGlyph.bounds[1], scaledGlyph.bounds[3], 0.5))):
                             # E center
                             getActiveEventTool().__class__.canSelectWithMarque = disable
                             self.corner = (1.0, 0.5)
@@ -897,7 +896,7 @@ class TransmutorToolController(Subscriber, ezui.WindowController):
                                                                                  self.model.transformOrigin[1])
                             self.model.transformOrigin = (0.0, 0.5)
                             self.clickAction = "scaling"
-                        elif ptOnHandle(point, (scaledGlyph.bounds[2], scaledGlyph.bounds[3])):
+                        elif self._ptOnHandle(point, (scaledGlyph.bounds[2], scaledGlyph.bounds[3])):
                             # NE Corner
                             getActiveEventTool().__class__.canSelectWithMarque = disable
                             self.corner = (1.0, 1.0)
@@ -913,7 +912,7 @@ class TransmutorToolController(Subscriber, ezui.WindowController):
                                                                                  self.model.transformOrigin[1])
                             self.model.transformOrigin = (0.0, 0.0)
                             self.clickAction = "scaling"
-                        elif ptOnHandle(point, (interpolate(scaledGlyph.bounds[0], scaledGlyph.bounds[2], 0.5), scaledGlyph.bounds[3])):
+                        elif self._ptOnHandle(point, (interpolate(scaledGlyph.bounds[0], scaledGlyph.bounds[2], 0.5), scaledGlyph.bounds[3])):
                             # N center
                             getActiveEventTool().__class__.canSelectWithMarque = disable
                             self.corner = (0.5, 1.0)
@@ -929,7 +928,7 @@ class TransmutorToolController(Subscriber, ezui.WindowController):
                                                                                  self.model.transformOrigin[1])
                             self.model.transformOrigin = (0.5, 0.0)
                             self.clickAction = "scaling"
-                        elif ptOnHandle(point, (scaledGlyph.bounds[0], scaledGlyph.bounds[3])):
+                        elif self._ptOnHandle(point, (scaledGlyph.bounds[0], scaledGlyph.bounds[3])):
                             # NW Corner
                             getActiveEventTool().__class__.canSelectWithMarque = disable
                             self.corner = (0.0, 1.0)
@@ -945,7 +944,7 @@ class TransmutorToolController(Subscriber, ezui.WindowController):
                                                                                  self.model.transformOrigin[1])
                             self.model.transformOrigin = (1.0, 0.0)
                             self.clickAction = "scaling"
-                        elif ptOnHandle(point, (scaledGlyph.bounds[0], interpolate(scaledGlyph.bounds[1], scaledGlyph.bounds[3], 0.5))):
+                        elif self._ptOnHandle(point, (scaledGlyph.bounds[0], interpolate(scaledGlyph.bounds[1], scaledGlyph.bounds[3], 0.5))):
                             # W center
                             getActiveEventTool().__class__.canSelectWithMarque = disable
                             self.corner = (0.0, 0.5)
