@@ -221,7 +221,10 @@ class TransmutorToolController(Subscriber, ezui.WindowController):
         = TwoColumnForm
         
         : Glyph:
-        [__]                        @glyphNamesTextBox
+        * HorizontalStack       
+        > [__]                      @glyphNamesTextBox
+        > ({xmark})                 @clearNameButton
+        
         ----------------------
         
         : Sources:
@@ -260,6 +263,15 @@ class TransmutorToolController(Subscriber, ezui.WindowController):
             ),
             glyphNamesTextBox=dict(
                 placeholder="Glyph name",
+                width=330,
+            ),
+            clearNameButton=dict(
+                symbolConfiguration={
+                    'scale'        : 'medium', 
+                    'weight'       : 'regular', 
+                    },
+                drawBorder=True,
+                width=20
             ),
             sourceFontTable=dict(
                 columnDescriptions=[
@@ -650,6 +662,11 @@ class TransmutorToolController(Subscriber, ezui.WindowController):
         if not self.model.sourceGlyphName:
             postEvent(f"{EXTENSION_IDENTIFIER}.transmutorDidStopDrawing")
         self.redrawView()
+        
+    def clearNameButtonCallback(self, sender):
+        self.glyphNamesTextBox = self.w.getItem("glyphNamesTextBox")
+        self.glyphNamesTextBox.set("")
+        self.glyphNamesTextBoxCallback(self.glyphNamesTextBox)
 
     def sourceFontTableEditCallback(self, sender):
         verbosePrint("TransmutorToolController::sourceFontTableEditCallback")
