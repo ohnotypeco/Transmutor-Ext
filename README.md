@@ -12,8 +12,11 @@ Transmutor uses ScaleFast's underlying scaling-interpolating library called [Mut
 It goes beyond just scaling glyphs in a few seconds to make those annoying backlot glyphs like `™` Trademark and `®` Registered. We all know that in type design, glyphs are often based on other glyphs. Transmutor can help you turn two `O`'s into an `8`, for instance, or squeeze a `W` into a `₩`. The possibilities are endless! (Well, not really, but it's still pretty cool.)
 
 ## Installation
-- Download the latest release from the [Releases](https://github.com/ohnotypeco/Transmutor-Ext/releases) page. Double-click the `.roboFontExt` file to install. OR
-- Find us on [Mechanic2](https://robofontmechanic.com/) and install from there.
+- Download the latest release from the [Releases](https://github.com/ohnotypeco/Transmutor-Ext/releases) page. OR
+- Install by cloning this repo. Make sure to install submodules, see [Contributing](#contributing).
+
+- Double-click the `.roboFontExt` file to install.
+- Not yet available on Mechanic!
 
 ## Usage
 ![Transmutor Window](images/ToolWindow.png)
