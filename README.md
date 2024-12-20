@@ -1,4 +1,6 @@
 # Transmutor
+**Project on hold for a bit while we work on client projects and rewrite this thing**
+
 _Scale and Transform glyphs in the RoboFont glyph window using MutatorScale_
 
 __By Colin M. Ford and OH no Type Co.__
