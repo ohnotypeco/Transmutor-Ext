@@ -29,9 +29,9 @@ import site
 from copy import deepcopy
 
 import ezui
-from mojo.events import EditingTool, getActiveEventTool
+from mojo.events import EditingTool, getActiveEventTool, postEvent
 from mojo.roboFont import version
-from mojo.subscriber import Subscriber, registerRoboFontSubscriber
+from mojo.subscriber import Subscriber, registerRoboFontSubscriber, registerSubscriberEvent, getRegisteredSubscriberEvents
 from mojo.tools import IntersectGlyphWithLine as intersect
 from mojo.UI import CurrentGlyphWindow, getDefault
 
@@ -118,6 +118,7 @@ class TransmutorModel():
     currentFont = None
     allFonts = []
     activeFonts = []
+    firstActiveFont = None
     sourceGlyphName = None
     scaler = None
 
@@ -155,15 +156,18 @@ class TransmutorModel():
     def updateScaler(self):
         if self.allFonts:
             self.scaler = MutatorScaleEngine(self.activeFonts)
+            self.firstActiveFont = self.activeFonts[0]
 
     def getScaledGlyph(self):
         verbosePrint("TransmutorModel::getScaledGlyph")
-        if self.currentFont is not None and self.currentGlyph is not None:
-            if self.sourceGlyphName != self.currentGlyph.name and self.sourceGlyphName in self.currentFont.keys():
+        if self.currentFont is not None and self.currentGlyph is not None and self.activeFonts:
+            self.firstActiveFont = self.activeFonts[0]
+            if self.sourceGlyphName != self.currentGlyph.name and self.sourceGlyphName in self.firstActiveFont.keys():
+                firstActiveFontName = makeListFontNameCached(self.firstActiveFont)
                 currentFontName = makeListFontNameCached(self.currentFont)
-                if currentFontName in self.scaler.masters:
-                    stems = (self.scaler.masters[currentFontName].vstem * self.stemWtRatioV,
-                             self.scaler.masters[currentFontName].hstem * self.stemWtRatioH)
+                if firstActiveFontName in self.scaler.masters:
+                    stems = (self.scaler.masters[firstActiveFontName].vstem * self.stemWtRatioV,
+                             self.scaler.masters[firstActiveFontName].hstem * self.stemWtRatioH)
                 elif len(self.scaler.masters):
                     stems = (self.scaler.masters[list(self.scaler.masters.keys())[0]].vstem * self.stemWtRatioV,
                              self.scaler.masters[list(self.scaler.masters.keys())[0]].hstem * self.stemWtRatioH)
@@ -217,7 +221,10 @@ class TransmutorToolController(Subscriber, ezui.WindowController):
         = TwoColumnForm
         
         : Glyph:
-        [__]                        @glyphNamesTextBox
+        * HorizontalStack       
+        > [__]                      @glyphNamesTextBox
+        > ({xmark})                 @clearNameButton
+        
         ----------------------
         
         : Sources:
@@ -256,6 +263,15 @@ class TransmutorToolController(Subscriber, ezui.WindowController):
             ),
             glyphNamesTextBox=dict(
                 placeholder="Glyph name",
+                width=330,
+            ),
+            clearNameButton=dict(
+                symbolConfiguration={
+                    'scale'        : 'medium', 
+                    'weight'       : 'regular', 
+                    },
+                drawBorder=True,
+                width=20
             ),
             sourceFontTable=dict(
                 columnDescriptions=[
@@ -308,14 +324,14 @@ class TransmutorToolController(Subscriber, ezui.WindowController):
             scaleHSlider=dict(
                 valueType="float",
                 value=1.0,
-                minValue=0.0,
+                minValue=0.001,
                 maxValue=4.0,
                 tickMarks=5,
             ),
             scaleVSlider=dict(
                 valueType="float",
                 value=1.0,
-                minValue=0.0,
+                minValue=0.001,
                 maxValue=4.0,
                 tickMarks=5,
             ),
@@ -372,7 +388,7 @@ class TransmutorToolController(Subscriber, ezui.WindowController):
                 self.active = True
                 self.userHasMovedGlyph = False
 
-                self.reset()
+                self.reset(resetActiveFonts=True)
 
                 self.w.open()
                 self.w.getNSWindow().makeKeyWindow()
@@ -395,16 +411,18 @@ class TransmutorToolController(Subscriber, ezui.WindowController):
             self.model = None
 
             self.active = False
+            postEvent(f"{EXTENSION_IDENTIFIER}.transmutorDidStopDrawing")
 
     # State Management Functions
     #############################################################
 
-    def reset(self):
+    def reset(self, resetActiveFonts=False):
         verbosePrint("TransmutorToolController::reset")
         self.model.currentFont = CurrentFont()
         self.model.currentGlyph = CurrentGlyph()
         self.model.allFonts = [font for font in AllFonts(sortOptions=["magic"])]
-        self.model.activeFonts = [font for font in self.model.allFonts if font.info.familyName]
+        if resetActiveFonts:
+            self.model.activeFonts = [font for font in self.model.allFonts if font.info.familyName]
 
         self.model.updateScaler()
         self.redrawView()
@@ -452,6 +470,7 @@ class TransmutorToolController(Subscriber, ezui.WindowController):
             scaledGlyph = self.model.getScaledGlyph()
 
             if scaledGlyph is not None:
+
                 scaledGlyphLayer = self.foregroundContainer.appendPathSublayer(
                     fillColor=self.model.scaledGlyphColor,
                     strokeColor=None,
@@ -467,6 +486,8 @@ class TransmutorToolController(Subscriber, ezui.WindowController):
                 )
                 pen = previewLayer.getPen()
                 scaledGlyph.draw(pen)
+
+                postEvent(f"{EXTENSION_IDENTIFIER}.transmutorDidDraw", transmutorGlyph=scaledGlyph, offset=(self.model.offsetX, self.model.offsetY), color=self.model.scaledGlyphColor)
 
                 boxLayer = self.foregroundContainer.appendPathSublayer(
                     fillColor=None,
@@ -621,6 +642,7 @@ class TransmutorToolController(Subscriber, ezui.WindowController):
                 wHandleLayer.addTranslationTransformation((self.model.offsetX, self.model.offsetY))
 
         self.refreshFromModel()
+        
 
     # Panel Callbacks
     #############################################################
@@ -628,16 +650,23 @@ class TransmutorToolController(Subscriber, ezui.WindowController):
     def glyphNamesTextBoxCallback(self, sender):
         verbosePrint("TransmutorToolController::glyphNamesTextBoxCallback")
         self.model.sourceGlyphName = sender.get()
-        if not self.userHasMovedGlyph and self.model.sourceGlyphName in self.model.currentFont.keys():
+        if not self.userHasMovedGlyph and self.model.sourceGlyphName in self.model.firstActiveFont.keys():
             self.model.offsetX = interpolate(
-                self.model.currentFont[self.model.sourceGlyphName].bounds[0],
-                self.model.currentFont[self.model.sourceGlyphName].bounds[2],
+                self.model.firstActiveFont[self.model.sourceGlyphName].bounds[0],
+                self.model.firstActiveFont[self.model.sourceGlyphName].bounds[2],
                 self.model.transformOrigin[0])
             self.model.offsetY = interpolate(
-                self.model.currentFont[self.model.sourceGlyphName].bounds[1],
-                self.model.currentFont[self.model.sourceGlyphName].bounds[3],
+                self.model.firstActiveFont[self.model.sourceGlyphName].bounds[1],
+                self.model.firstActiveFont[self.model.sourceGlyphName].bounds[3],
                 self.model.transformOrigin[1])
+        if not self.model.sourceGlyphName:
+            postEvent(f"{EXTENSION_IDENTIFIER}.transmutorDidStopDrawing")
         self.redrawView()
+        
+    def clearNameButtonCallback(self, sender):
+        self.glyphNamesTextBox = self.w.getItem("glyphNamesTextBox")
+        self.glyphNamesTextBox.set("")
+        self.glyphNamesTextBoxCallback(self.glyphNamesTextBox)
 
     def sourceFontTableEditCallback(self, sender):
         verbosePrint("TransmutorToolController::sourceFontTableEditCallback")
@@ -968,8 +997,12 @@ class TransmutorToolController(Subscriber, ezui.WindowController):
                             else:
                                 self.clickAction = "moving"
                                 self.userHasMovedGlyph = True
+
                                 self.clickX = self.downPt[0] - self.model.offsetX
                                 self.clickY = self.downPt[1] - self.model.offsetY
+
+                                self.storedOffsetX = self.model.offsetX
+                                self.storedOffsetY = self.model.offsetY
                         else:
                             # outside the box, not on one of the handles
                             self.clickAction = None
@@ -1013,9 +1046,22 @@ class TransmutorToolController(Subscriber, ezui.WindowController):
                                 self.model.scaleH = scaleH
 
                             elif self.clickAction == "moving":
+                                
                                 # If the user is moving, change the offset to match the current mouse position relative to the position of the click within the bounds of the glyph
-                                self.model.offsetX = x - self.clickX
-                                self.model.offsetY = y - self.clickY
+                                if not self.shiftDown:
+                                    self.model.offsetX = x - self.clickX
+                                    self.model.offsetY = y - self.clickY
+                                # If shift is down, keep the X or Y the same, depending on which mouse delta is higher.
+                                else:
+                                    deltaX = (x - self.downPt[0])
+                                    deltaY = (y - self.downPt[1])
+                                    if abs(deltaX) >= abs(deltaY):
+                                        self.model.offsetX = x - self.clickX
+                                        self.model.offsetY = self.storedOffsetY
+                                    else:
+                                        self.model.offsetX = self.storedOffsetX
+                                        self.model.offsetY = y - self.clickY
+                                
                             elif self.clickAction == "interpolating":
                                 # The user held down option, and is interpolating
                                 dampener = 200 * (1/CurrentGlyphWindow().getGlyphViewScale())
@@ -1046,6 +1092,28 @@ class TransmutorToolController(Subscriber, ezui.WindowController):
 
 
 def main():
+    # Register a subscriber event for Transmutor updating a drawing
+    event_name = f"{EXTENSION_IDENTIFIER}.transmutorDidDraw"
+    if event_name not in getRegisteredSubscriberEvents():
+        registerSubscriberEvent(
+            subscriberEventName=event_name,
+            methodName="transmutorDidDraw",
+            lowLevelEventNames=[event_name],
+            dispatcher="roboFont",
+            documentation="Sent when Transmutor has updated the current glyph drawing.",
+            delay=None
+        )
+    # Register a subscriber event for transmutor stopping drawing
+    event_name = f"{EXTENSION_IDENTIFIER}.transmutorDidStopDrawing"
+    if event_name not in getRegisteredSubscriberEvents():
+        registerSubscriberEvent(
+            subscriberEventName=event_name,
+            methodName="transmutorDidStopDrawing",
+            lowLevelEventNames=[event_name],
+            dispatcher="roboFont",
+            documentation="Sent when Transmutor has stopped drawing.",
+            delay=None
+        )
     registerRoboFontSubscriber(TransmutorToolController)
 
 
