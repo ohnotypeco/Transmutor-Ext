@@ -1,8 +1,14 @@
 """
 Transmutor
-========
+==========
 Contours added by this script are tagged in public.objectLibs so they can
 always be identified and re-interpolated.
+
+Architecture (MVC, single file):
+    Model:      DesignSpaceManager — owns DS paths, operator, interpolation
+    View/Ctrl:  TransmutorController — EZUI panel, mediates UI ↔ model
+    Tool:       TransmutorTool — BaseEventTool, mouse events, Merz drawing
+    Helpers:    Block CRUD functions operate on fontParts glyphs directly
 """
 
 import colorsys
@@ -16,7 +22,7 @@ from AppKit import NSMenuItem
 from fontTools.designspaceLib import DesignSpaceDocument
 from mojo.events import BaseEventTool, installTool
 from ufoProcessor.ufoOperator import UFOOperator
-from mojo.UI import CurrentGlyphWindow, GetFile, getDefault
+from mojo.UI import CurrentGlyphWindow, GetFile
 
 
 # ---------------------------------------------------------------------------
@@ -31,188 +37,59 @@ CONTOUR_SOURCE_KEY = f"{LIB_PREFIX}.source"
 BLOCK_ID_KEY = f"{LIB_PREFIX}.blockID"
 BLOCK_COLOR_KEY = f"{LIB_PREFIX}.color"
 
-# Stroke width used when drawing block outlines in the glyph view background
 BLOCK_STROKE_WIDTH = 10
-# Gaussian blur radius applied to each block outline layer
-# BLOCK_BLUR_RADIUS = 0
 OUTLINE_ALPHA = 0.15
-# Size in glyph units of each square selection handle
 HANDLE_SIZE = 10
-# Cardinal names for each of the 8 handles, matching the order used in _drawHandles
+
+# Merz container IDs
+_MERZ_BG_ID = "co.ohnotype.transmutor"
+_MERZ_FG_ID = "co.ohnotype.transmutor.handles"
+
+# Cardinal names for each of the 8 selection handles
 _HANDLE_NAMES = ("SW", "S", "SE", "E", "NE", "N", "NW", "W")
 
 # Per-handle scaling metadata.
-# handleNorm: (u, v) normalised position of the dragged handle within bounds.
-# anchorNorm: (u, v) normalised position of the fixed anchor (opposite side).
-# scaleH/scaleV: whether that axis is affected by dragging this handle.
-# normalised coords: (0,0)=SW corner, (1,1)=NE corner.
+# handleNorm / anchorNorm: normalised (u, v) within bounds — (0,0)=SW, (1,1)=NE.
+# scaleH / scaleV: which axes the handle controls.
 _HANDLE_SCALING_INFO = {
     "SW": dict(handleNorm=(0.0, 0.0), anchorNorm=(1.0, 1.0), scaleH=True,  scaleV=True),
-    "S" : dict(handleNorm=(0.5, 0.0), anchorNorm=(0.5, 1.0), scaleH=False, scaleV=True),
+    "S":  dict(handleNorm=(0.5, 0.0), anchorNorm=(0.5, 1.0), scaleH=False, scaleV=True),
     "SE": dict(handleNorm=(1.0, 0.0), anchorNorm=(0.0, 1.0), scaleH=True,  scaleV=True),
-    "E" : dict(handleNorm=(1.0, 0.5), anchorNorm=(0.0, 0.5), scaleH=True,  scaleV=False),
+    "E":  dict(handleNorm=(1.0, 0.5), anchorNorm=(0.0, 0.5), scaleH=True,  scaleV=False),
     "NE": dict(handleNorm=(1.0, 1.0), anchorNorm=(0.0, 0.0), scaleH=True,  scaleV=True),
-    "N" : dict(handleNorm=(0.5, 1.0), anchorNorm=(0.5, 0.0), scaleH=False, scaleV=True),
+    "N":  dict(handleNorm=(0.5, 1.0), anchorNorm=(0.5, 0.0), scaleH=False, scaleV=True),
     "NW": dict(handleNorm=(0.0, 1.0), anchorNorm=(1.0, 0.0), scaleH=True,  scaleV=True),
-    "W" : dict(handleNorm=(0.0, 0.5), anchorNorm=(1.0, 0.5), scaleH=True,  scaleV=False),
+    "W":  dict(handleNorm=(0.0, 0.5), anchorNorm=(1.0, 0.5), scaleH=True,  scaleV=False),
 }
 
-# Module-level reference to the active InterpTool instance for cross-object callbacks
-_TOOL_INSTANCE = None
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Pure utility functions
 # ---------------------------------------------------------------------------
 
-def _generateBlockColor(glyph) -> list:
-    """Return a bright, non-muddy [R, G, B, 0.8] color not already used by blocks in glyph.
+def _lerp(a: float, b: float, t: float) -> float:
+    """Linear interpolation: a + (b - a) * t."""
+    return a + (b - a) * t
 
-    Colors are chosen in HSV space (S=0.80, V=0.90) to stay vivid and clear.
-    Hue is selected by maximising minimum circular distance from existing block hues,
-    with a small random jitter so repeated inserts into an empty glyph still vary.
+
+def _handlePositions(bounds) -> list:
+    """Return 8 (x, y) handle positions for the given bounding box.
+
+    Order matches _HANDLE_NAMES: SW, S, SE, E, NE, N, NW, W.
     """
-    objectLibs = glyph.lib.get(OBJECT_LIBS_KEY, {})
-    existingHues = []
-    for meta in objectLibs.values():
-        if not isinstance(meta, dict):
-            continue
-        color = meta.get(BLOCK_COLOR_KEY)
-        if color and len(color) >= 3:
-            h, _s, _v = colorsys.rgb_to_hsv(color[0], color[1], color[2])
-            existingHues.append(h)
-
-    # Candidate hues at every 30° step (12 divisions)
-    candidates = [i / 12.0 for i in range(12)]
-    if existingHues:
-        def _minCircularDist(h: float) -> float:
-            return min(min(abs(h - e), 1.0 - abs(h - e)) for e in existingHues)
-        hue = max(candidates, key=_minCircularDist)
-        # Add a small jitter so identical-hue ties still vary slightly
-        hue = (hue + random.uniform(-0.02, 0.02)) % 1.0
-    else:
-        hue = random.random()
-
-    r, g, b = colorsys.hsv_to_rgb(hue, 0.80, 0.90)
-    return [r, g, b]
-
-
-def _normalizedToDesign(axis, normalizedValue: float) -> float:
-    """Convert a normalized [−1, 1] value to design-space coordinates.
-
-    Uses trilinear denormalization:
-      positive side [0 → 1] maps default → maximum in user space.
-      negative side [−1 → 0] maps minimum → default in user space.
-    Then applies the axis <map> to reach design space.
-    """
-    if normalizedValue >= 0:
-        userValue = axis.default + normalizedValue * (axis.maximum - axis.default)
-    else:
-        userValue = axis.default + normalizedValue * (axis.default - axis.minimum)
-    return axis.map_forward(userValue)
-
-
-def _removeTaggedContours(glyph) -> int:
-    """Remove all contours previously tagged by this script. Returns count removed."""
-    objectLibs = dict(glyph.lib.get(OBJECT_LIBS_KEY, {}))
-    toRemove = [
-        c for c in glyph.contours
-        if c.identifier and CONTOUR_SOURCE_KEY in objectLibs.get(c.identifier, {})
+    xMin, yMin, xMax, yMax = bounds
+    midX = (xMin + xMax) / 2
+    midY = (yMin + yMax) / 2
+    return [
+        (xMin, yMin),   # SW
+        (midX, yMin),   # S
+        (xMax, yMin),   # SE
+        (xMax, midY),   # E
+        (xMax, yMax),   # NE
+        (midX, yMax),   # N
+        (xMin, yMax),   # NW
+        (xMin, midY),   # W
     ]
-    for contour in toRemove:
-        del objectLibs[contour.identifier]
-        glyph.removeContour(contour)
-    glyph.lib[OBJECT_LIBS_KEY] = objectLibs
-    return len(toRemove)
-
-
-def _removeBlockContours(glyph, blockID: str) -> int:
-    """Remove only the contours belonging to the given blockID. Returns count removed."""
-    objectLibs = dict(glyph.lib.get(OBJECT_LIBS_KEY, {}))
-    toRemove = [
-        c for c in glyph.contours
-        if c.identifier and objectLibs.get(c.identifier, {}).get(BLOCK_ID_KEY) == blockID
-    ]
-    for contour in toRemove:
-        del objectLibs[contour.identifier]
-        glyph.removeContour(contour)
-    glyph.lib[OBJECT_LIBS_KEY] = objectLibs
-    return len(toRemove)
-
-
-def _insertTaggedContours(glyph, glyphMathObj, axis, designValue: float,
-                          normalizedValue: float, dsRelPath: str,
-                          glyphName: str,
-                          transform: tuple = (1, 0, 0, 1, 0, 0),
-                          color: list = None,
-                          blockID: str = None) -> list:
-    """Draw glyphMathObj contours into glyph, apply affine transform, and tag in public.objectLibs.
-
-    transform: 6-tuple (xx, xy, yx, yy, dx, dy) affine matrix.
-    color:     [R, G, B] list. Auto-generated (unique per glyph) when None.
-    blockID:   Reuse an existing block ID (for in-place updates) or None to mint a new one.
-    """
-    if color is None:
-        color = _generateBlockColor(glyph)
-    if blockID is None:
-        blockID = str(uuid.uuid4())
-
-    countBefore = len(glyph)
-    glyphMathObj.drawPoints(glyph.getPointPen())
-
-    # Apply affine transform to newly added contours
-    identity = (1, 0, 0, 1, 0, 0)
-    if transform != identity:
-        for contour in glyph.contours[countBefore:]:
-            contour.transformBy(transform)
-
-    objectLibs = dict(glyph.lib.get(OBJECT_LIBS_KEY, {}))
-    meta = {
-        CONTOUR_SOURCE_KEY: dsRelPath,
-        BLOCK_ID_KEY: blockID,
-        BLOCK_COLOR_KEY: color,
-        f"{LIB_PREFIX}.glyphName": glyphName,
-        f"{LIB_PREFIX}.location": {axis.name: designValue},
-        f"{LIB_PREFIX}.normalizedLocation": {axis.tag: normalizedValue},
-        f"{LIB_PREFIX}.transform": list(transform),
-    }
-    newIds = []
-    for contour in glyph.contours[countBefore:]:
-        identifier = contour.getIdentifier()
-        objectLibs[identifier] = meta
-        newIds.append(identifier)
-    glyph.lib[OBJECT_LIBS_KEY] = objectLibs
-    return newIds
-
-
-# Controls that are enabled/disabled based on block hit-test
-_PANEL_CONTROLS = [
-    "glyphNameField",
-    "wghtSlider",
-    "scaleXSlider",
-    "scaleYSlider",
-    "xField",
-    "yField",
-]
-
-
-def _getBlocksFromGlyph(glyph) -> dict:
-    """Group tagged contours by blockID.
-
-    Returns a dict mapping blockID → {"contours": [...], "meta": {...}}.
-    """
-    objectLibs = glyph.lib.get(OBJECT_LIBS_KEY, {})
-    blocks = {}
-    for contour in glyph.contours:
-        if not contour.identifier:
-            continue
-        meta = objectLibs.get(contour.identifier, {})
-        if BLOCK_ID_KEY not in meta:
-            continue
-        blockID = meta[BLOCK_ID_KEY]
-        if blockID not in blocks:
-            blocks[blockID] = {"contours": [], "meta": meta}
-        blocks[blockID]["contours"].append(contour)
-    return blocks
 
 
 def _unionBounds(contours) -> tuple:
@@ -235,28 +112,264 @@ def _unionBounds(contours) -> tuple:
 
 
 def _pointInBounds(point, bounds) -> bool:
-    """Return True if point is inside the given (xMin, yMin, xMax, yMax) bounds."""
+    """Return True if point is inside the given bounding box."""
     if bounds is None:
         return False
     xMin, yMin, xMax, yMax = bounds
     return xMin <= point.x <= xMax and yMin <= point.y <= yMax
 
 
+def _generateBlockColor(glyph) -> list:
+    """Return a bright [R, G, B] color maximally distinct from existing block colors.
+
+    Colors are chosen in HSV space (S=0.80, V=0.90) to stay vivid and clear.
+    Hue is selected by maximising minimum circular distance from existing hues.
+    """
+    objectLibs = glyph.lib.get(OBJECT_LIBS_KEY, {})
+    existingHues = []
+    for meta in objectLibs.values():
+        if not isinstance(meta, dict):
+            continue
+        color = meta.get(BLOCK_COLOR_KEY)
+        if color and len(color) >= 3:
+            h, _s, _v = colorsys.rgb_to_hsv(color[0], color[1], color[2])
+            existingHues.append(h)
+
+    candidates = [i / 12.0 for i in range(12)]
+    if existingHues:
+        def _minCircularDist(h: float) -> float:
+            return min(min(abs(h - e), 1.0 - abs(h - e)) for e in existingHues)
+        hue = max(candidates, key=_minCircularDist)
+        hue = (hue + random.uniform(-0.02, 0.02)) % 1.0
+    else:
+        hue = random.random()
+
+    r, g, b = colorsys.hsv_to_rgb(hue, 0.80, 0.90)
+    return [r, g, b]
+
+
+def _normalizedToDesign(axis, normalizedValue: float) -> float:
+    """Convert a normalized [-1, 1] value to design-space coordinates.
+
+    Uses trilinear denormalization then applies the axis map.
+    """
+    if normalizedValue >= 0:
+        userValue = axis.default + normalizedValue * (axis.maximum - axis.default)
+    else:
+        userValue = axis.default + normalizedValue * (axis.default - axis.minimum)
+    return axis.map_forward(userValue)
+
+
 # ---------------------------------------------------------------------------
-# Controller
+# Block CRUD — pure glyph-level operations
 # ---------------------------------------------------------------------------
 
-class TransmutorController(ezui.WindowController):
+def _getBlocksFromGlyph(glyph) -> dict:
+    """Return {blockID: {"contours": [...], "meta": {...}}} for tagged contours."""
+    objectLibs = glyph.lib.get(OBJECT_LIBS_KEY, {})
+    blocks = {}
+    for contour in glyph.contours:
+        if not contour.identifier:
+            continue
+        meta = objectLibs.get(contour.identifier, {})
+        if BLOCK_ID_KEY not in meta:
+            continue
+        blockID = meta[BLOCK_ID_KEY]
+        if blockID not in blocks:
+            blocks[blockID] = {"contours": [], "meta": meta}
+        blocks[blockID]["contours"].append(contour)
+    return blocks
 
-    def build(self):
-        # Designspace loading is deferred until one is chosen via the popup.
-        # These are set by loadDesignSpace() once a file is selected.
-        self.designspacePaths = []  # ordered list of known absolute paths, deduplicated
+
+def _removeBlockContours(glyph, blockID: str) -> int:
+    """Remove contours belonging to blockID. Returns count removed."""
+    objectLibs = dict(glyph.lib.get(OBJECT_LIBS_KEY, {}))
+    toRemove = [
+        c for c in glyph.contours
+        if c.identifier and objectLibs.get(c.identifier, {}).get(BLOCK_ID_KEY) == blockID
+    ]
+    for contour in toRemove:
+        del objectLibs[contour.identifier]
+        glyph.removeContour(contour)
+    glyph.lib[OBJECT_LIBS_KEY] = objectLibs
+    return len(toRemove)
+
+
+def _insertTaggedContours(glyph, glyphMathObj, axis, designValue: float,
+                          normalizedValue: float, dsRelPath: str,
+                          glyphName: str,
+                          transform: tuple = (1, 0, 0, 1, 0, 0),
+                          color: list = None,
+                          blockID: str = None) -> list:
+    """Draw interpolated contours into glyph, apply transform, tag in objectLibs.
+
+    Returns list of new contour identifiers.
+    """
+    if color is None:
+        color = _generateBlockColor(glyph)
+    if blockID is None:
+        blockID = str(uuid.uuid4())
+
+    countBefore = len(glyph)
+    glyphMathObj.drawPoints(glyph.getPointPen())
+
+    if transform != (1, 0, 0, 1, 0, 0):
+        for contour in glyph.contours[countBefore:]:
+            contour.transformBy(transform)
+
+    objectLibs = dict(glyph.lib.get(OBJECT_LIBS_KEY, {}))
+    meta = {
+        CONTOUR_SOURCE_KEY: dsRelPath,
+        BLOCK_ID_KEY: blockID,
+        BLOCK_COLOR_KEY: color,
+        f"{LIB_PREFIX}.glyphName": glyphName,
+        f"{LIB_PREFIX}.location": {axis.name: designValue},
+        f"{LIB_PREFIX}.normalizedLocation": {axis.tag: normalizedValue},
+        f"{LIB_PREFIX}.transform": list(transform),
+    }
+    newIds = []
+    for contour in glyph.contours[countBefore:]:
+        identifier = contour.getIdentifier()
+        objectLibs[identifier] = meta
+        newIds.append(identifier)
+    glyph.lib[OBJECT_LIBS_KEY] = objectLibs
+    return newIds
+
+
+# ---------------------------------------------------------------------------
+# Model — DesignSpaceManager
+# ---------------------------------------------------------------------------
+
+class DesignSpaceManager:
+    """Manages known designspace paths and the currently loaded UFOOperator.
+
+    Responsible for:
+    - Tracking registered paths (deduplicated, newest first)
+    - Loading a designspace into a UFOOperator
+    - Interpolating glyphs at a given normalised location
+    """
+
+    def __init__(self):
+        self._paths = []         # ordered list of absolute, normalised paths
         self._wghtAxis = None
         self._op = None
         self._dsRelPath = None
-        self._dsPath = None      # absolute path of the currently loaded designspace
+        self._dsPath = None
         self._defaultFont = None
+
+    # ---- Properties ----
+
+    @property
+    def paths(self) -> list:
+        """All registered designspace paths (newest first)."""
+        return list(self._paths)
+
+    @property
+    def currentPath(self) -> str:
+        """Absolute path of the currently loaded designspace, or None."""
+        return self._dsPath
+
+    @property
+    def currentRelPath(self) -> str:
+        """SCRIPT_DIR-relative path of the currently loaded designspace, or None."""
+        return self._dsRelPath
+
+    @property
+    def isLoaded(self) -> bool:
+        """True when a designspace has been successfully loaded."""
+        return (self._op is not None
+                and self._defaultFont is not None
+                and self._wghtAxis is not None)
+
+    @property
+    def wghtAxis(self):
+        """The wght axis descriptor, or None."""
+        return self._wghtAxis
+
+    # ---- Path management ----
+
+    def registerPath(self, path: str) -> bool:
+        """Add an absolute path to the known list. Returns True if newly added."""
+        path = os.path.normpath(os.path.abspath(path))
+        if path in self._paths:
+            return False
+        self._paths.insert(0, path)
+        return True
+
+    def indexForPath(self, path: str) -> int:
+        """Return the index of path in the known list, or -1."""
+        path = os.path.normpath(os.path.abspath(path))
+        try:
+            return self._paths.index(path)
+        except ValueError:
+            return -1
+
+    def popupLabels(self) -> list:
+        """Return display labels for the designspace popup."""
+        if len(self._paths) > 1:
+            common = os.path.commonpath(self._paths)
+            return [os.path.relpath(p, common) for p in self._paths]
+        elif self._paths:
+            return [os.path.basename(self._paths[0])]
+        return []
+
+    # ---- Loading ----
+
+    def load(self, path: str) -> bool:
+        """Load a designspace file. Returns True on success. Skips reload if current."""
+        path = os.path.normpath(os.path.abspath(path))
+        if path == self._dsPath:
+            return True
+        try:
+            ds = DesignSpaceDocument.fromfile(path)
+            self._wghtAxis = next((a for a in ds.axes if a.tag == "wght"), None)
+            self._op = UFOOperator(path, useVarlib=False)
+            self._op.loadFonts()
+            self._dsRelPath = os.path.relpath(path, SCRIPT_DIR)
+            self._dsPath = path
+            self._defaultFont = self._op.findDefaultFont()
+            return True
+        except Exception as e:
+            print(f"Failed to load designspace '{path}': {e}")
+            return False
+
+    # ---- Interpolation ----
+
+    def interpolateGlyph(self, glyphName: str, normalizedValue: float):
+        """Return (mathGlyph, designValue) or None if interpolation fails."""
+        if not self.isLoaded:
+            print("No designspace loaded — choose one from the popup.")
+            return None
+        if glyphName not in self._defaultFont:
+            print(f"'{glyphName}' not found in default source.")
+            return None
+        designValue = _normalizedToDesign(self._wghtAxis, normalizedValue)
+        location = {self._wghtAxis.name: designValue}
+        mathGlyph = self._op.makeOneGlyph(
+            glyphName, location, decomposeComponents=False
+        )
+        if mathGlyph is None:
+            print(f"Could not interpolate '{glyphName}' at {location}")
+            return None
+        return mathGlyph, designValue
+
+
+# ---------------------------------------------------------------------------
+# Controller — TransmutorController (EZUI Panel)
+# ---------------------------------------------------------------------------
+
+class TransmutorController(ezui.WindowController):
+    """EZUI panel for Transmutor.
+
+    Combines View (owns the EZPanel) and Controller (mediates UI <-> model).
+    The TransmutorTool registers itself via setTool() so the controller can
+    request Merz redraws after block mutations.
+    """
+
+    def build(self):
+        self._dsManager = DesignSpaceManager()
+        self._tool = None
+        self._selectedBlockID = None
 
         content = """
         = TwoColumnForm
@@ -290,32 +403,12 @@ class TransmutorController(ezui.WindowController):
             designspacePopupButton=dict(
                 items=["Choose a Designspace ..."],
             ),
-            glyphNameField=dict(
-                value=DEFAULT_GLYPH_NAME,
-            ),
-            xField=dict(
-                value="0",
-                placeholder="X",
-            ),
-            yField=dict(
-                value="0",
-                placeholder="Y",
-            ),
-            wghtSlider=dict(
-                minValue=0.0,
-                maxValue=1.0,
-                value=0.6,
-            ),
-            scaleXSlider=dict(
-                minValue=1,
-                maxValue=200,
-                value=100,
-            ),
-            scaleYSlider=dict(
-                minValue=1,
-                maxValue=200,
-                value=100,
-            ),
+            glyphNameField=dict(value=DEFAULT_GLYPH_NAME),
+            xField=dict(value="0", placeholder="X"),
+            yField=dict(value="0", placeholder="Y"),
+            wghtSlider=dict(minValue=0.0, maxValue=1.0, value=0.6),
+            scaleXSlider=dict(minValue=1, maxValue=200, value=100),
+            scaleYSlider=dict(minValue=1, maxValue=200, value=100),
         )
 
         self.w = ezui.EZPanel(
@@ -331,43 +424,127 @@ class TransmutorController(ezui.WindowController):
 
         # Pre-populate with any open designspaces
         try:
-            allDesignSpaces = AllDesignspaces()
+            for ds in (AllDesignspaces() or []):
+                self.addDesignSpace(ds.path)
         except Exception:
-            allDesignSpaces = []
-        for ds in (allDesignSpaces or []):
-            self.addDesignSpace(ds.path)
+            pass
 
         try:
             current = CurrentDesignspace()
+            if current and current.path:
+                self.loadDesignSpace(current.path)
         except Exception:
-            current = None
-        if current and current.path:
-            self.loadDesignSpace(current.path)
-        elif self.designspacePaths:
-            # No current designspace, but we have registered paths — load the
-            # first one so the popup selection matches the active data model.
-            self.loadDesignSpace(self.designspacePaths[0])
+            pass
+
+        # If no current DS but we have registered ones, load the first
+        if not self._dsManager.isLoaded and self._dsManager.paths:
+            self.loadDesignSpace(self._dsManager.paths[0])
 
     def started(self):
         self.w.open()
-        # No block selected initially; controls show defaults but are always enabled
-        self._selectedBlockID = None
+
+    # -----------------------------------------------------------------------
+    # Tool registration
+    # -----------------------------------------------------------------------
+
+    def setTool(self, tool) -> None:
+        """Register the active TransmutorTool for Merz redraw callbacks."""
+        self._tool = tool
+
+    # -----------------------------------------------------------------------
+    # Properties
+    # -----------------------------------------------------------------------
+
+    @property
+    def dsManager(self) -> DesignSpaceManager:
+        """The underlying designspace model."""
+        return self._dsManager
+
+    @property
+    def selectedBlockID(self) -> str:
+        """The ID of the currently selected block, or None."""
+        return self._selectedBlockID
+
+    @selectedBlockID.setter
+    def selectedBlockID(self, value: str):
+        self._selectedBlockID = value
+
+    @property
+    def glyphName(self) -> str:
+        """Current glyph name from the text field."""
+        return self.w.getItem("glyphNameField").get().strip()
+
+    @property
+    def normalizedWght(self) -> float:
+        """Current normalised wght value from the slider."""
+        return self.w.getItem("wghtSlider").get()
+
+    @property
+    def offset(self) -> tuple:
+        """Current (x, y) offset as integers, defaulting to 0 on parse failure."""
+        def _parse(val):
+            try:
+                return int(round(float(val)))
+            except (ValueError, TypeError):
+                return 0
+        return (
+            _parse(self.w.getItem("xField").get()),
+            _parse(self.w.getItem("yField").get()),
+        )
+
+    @offset.setter
+    def offset(self, xy: tuple):
+        """Set X/Y offset fields. Accepts int, float, or pre-formatted strings."""
+        self.w.getItem("xField").set(str(xy[0]))
+        self.w.getItem("yField").set(str(xy[1]))
+
+    @property
+    def scalePercent(self) -> tuple:
+        """Current (scaleX%, scaleY%) from the sliders."""
+        return (
+            self.w.getItem("scaleXSlider").get(),
+            self.w.getItem("scaleYSlider").get(),
+        )
+
+    @scalePercent.setter
+    def scalePercent(self, xy: tuple):
+        """Set the scale sliders. Accepts int or float values."""
+        self.w.getItem("scaleXSlider").set(xy[0])
+        self.w.getItem("scaleYSlider").set(xy[1])
+
+    @property
+    def transform(self) -> tuple:
+        """6-tuple affine matrix (xx, xy, yx, yy, dx, dy) from current controls."""
+        ox, oy = self.offset
+        sx = max(1, self.w.getItem("scaleXSlider").get()) / 100.0
+        sy = max(1, self.w.getItem("scaleYSlider").get()) / 100.0
+        return (sx, 0, 0, sy, ox, oy)
 
     # -----------------------------------------------------------------------
     # Designspace management
     # -----------------------------------------------------------------------
 
-    def designspacePopupButtonCallback(self, sender):
-        """Respond to popup selection: open file picker or switch to chosen DS."""
-        if sender.getItem() == "Choose a Designspace ...":
-            self.openDesignSpace()
-        else:
-            idx = sender.get()
-            if 0 <= idx < len(self.designspacePaths):
-                self.loadDesignSpace(self.designspacePaths[idx])
+    def addDesignSpace(self, path: str) -> None:
+        """Register a designspace path and refresh the popup."""
+        self._dsManager.registerPath(path)
+        self._refreshPopup()
 
-    def openDesignSpace(self, path: str = None) -> None:
-        """Open a designspace, prompting with a file picker when no path is given."""
+    def loadDesignSpace(self, path: str) -> None:
+        """Load a designspace and sync the popup selection."""
+        path = os.path.normpath(os.path.abspath(path))
+        self._dsManager.load(path)
+        idx = self._dsManager.indexForPath(path)
+        if idx >= 0:
+            self.w.getItem("designspacePopupButton").set(idx)
+
+    def _refreshPopup(self) -> None:
+        """Rebuild popup items from the manager's path list."""
+        items = self._dsManager.popupLabels()
+        items += [NSMenuItem.separatorItem(), "Choose a Designspace ..."]
+        self.w.getItem("designspacePopupButton").setItems(items)
+
+    def _openDesignSpace(self, path: str = None) -> None:
+        """Prompt for a DS file if no path given, then register and load."""
         if not path:
             path = GetFile(
                 message="Select a Designspace file",
@@ -379,246 +556,93 @@ class TransmutorController(ezui.WindowController):
             self.addDesignSpace(path)
             self.loadDesignSpace(path)
 
-    def addDesignSpace(self, path: str) -> None:
-        """Register a designspace path and refresh the popup items."""
-        path = os.path.normpath(os.path.abspath(path))
-        if path not in self.designspacePaths:
-            self.designspacePaths.insert(0, path)
-
-        if len(self.designspacePaths) > 1:
-            commonPath = os.path.commonpath(self.designspacePaths)
-            items = [os.path.relpath(p, commonPath) for p in self.designspacePaths]
-        elif self.designspacePaths:
-            items = [os.path.basename(self.designspacePaths[0])]
-        else:
-            items = []
-
-        items += [NSMenuItem.separatorItem(), "Choose a Designspace ..."]
-        self.w.getItem("designspacePopupButton").setItems(items)
-
-    def loadDesignSpace(self, path: str) -> None:
-        """Load the given designspace into the operator and update the popup selection."""
-        path = os.path.normpath(os.path.abspath(path))
-        if path != self._dsPath:
-            try:
-                ds = DesignSpaceDocument.fromfile(path)
-                self._wghtAxis = next((a for a in ds.axes if a.tag == "wght"), None)
-                self._op = UFOOperator(path, useVarlib=False)
-                self._op.loadFonts()
-                self._dsRelPath = os.path.relpath(path, SCRIPT_DIR)
-                self._dsPath = path
-                self._defaultFont = self._op.findDefaultFont()
-            except Exception as e:
-                print(f"Failed to load designspace '{path}': {e}")
-                return
-
-        # Always sync the popup selection, even if the DS was already loaded
-        if path in self.designspacePaths:
-            self.w.getItem("designspacePopupButton").set(self.designspacePaths.index(path))
-
     # -----------------------------------------------------------------------
-    # Internal helpers
+    # Block operations
     # -----------------------------------------------------------------------
 
-    def _glyphName(self) -> str:
-        return self.w.getItem("glyphNameField").get().strip()
-
-    def _currentNormalized(self) -> float:
-        return self.w.getItem("wghtSlider").get()
-
-    def _currentOffset(self) -> tuple:
-        """Return (x, y) offset as integers, defaulting to 0 on invalid input.
-
-        Accepts both integer and float strings so the field can hold precise
-        float values during a scale drag without losing information.
-        """
-        def _parseNum(val: str) -> int:
-            try:
-                return int(round(float(val)))
-            except (ValueError, TypeError):
-                return 0
-        x = _parseNum(self.w.getItem("xField").get())
-        y = _parseNum(self.w.getItem("yField").get())
-        return x, y
-
-    def _currentTransform(self) -> tuple:
-        """Return a 6-tuple affine matrix (xx, xy, yx, yy, dx, dy).
-
-        Scale values are read from the sliders as percentages (1–200) and
-        converted to scale factors. A zero scale is guarded against by
-        clamping to a minimum of 1% (0.01). Offset values supply dx/dy.
-        """
-        offsetX, offsetY = self._currentOffset()
-        scaleX = max(1, self.w.getItem("scaleXSlider").get()) / 100.0
-        scaleY = max(1, self.w.getItem("scaleYSlider").get()) / 100.0
-        # Affine matrix: scale around origin then translate
-        return (scaleX, 0, 0, scaleY, offsetX, offsetY)
-
-    def _resolveGlyph(self, glyphName: str = None):
-        """Return (glyphName, g, mathGlyph, designValue, normalizedValue) or None on failure."""
-        if self._op is None or self._defaultFont is None or self._wghtAxis is None:
-            print("No designspace loaded — choose one from the popup.")
-            return None
-        if glyphName is None:
-            glyphName = self._glyphName()
-        if glyphName not in self._defaultFont:
-            print(f"'{glyphName}' not found in default source — no change.")
-            return None
-        g = CurrentGlyph()
-        if g is None:
-            print("No current glyph selected.")
-            return None
-        normalizedValue = self._currentNormalized()
-        designValue = _normalizedToDesign(self._wghtAxis, normalizedValue)
-        location = {self._wghtAxis.name: designValue}
-        mathGlyph = self._op.makeOneGlyph(glyphName, location, decomposeComponents=False)
-        if mathGlyph is None:
-            print(f"Could not interpolate '{glyphName}' at {location}")
-            return None
-        return glyphName, g, mathGlyph, designValue, normalizedValue
-
-    def _updateSelectedBlock(self) -> None:
-        """Replace the contours of the currently selected block in-place.
-
-        If no block is selected this is a no-op — sliders are just staging for
-        the next Insert.
-        """
+    def updateSelectedBlock(self) -> None:
+        """Re-interpolate and replace the currently selected block in-place."""
         if self._selectedBlockID is None:
             return
-        result = self._resolveGlyph()
+        g = CurrentGlyph()
+        if g is None:
+            return
+        result = self._dsManager.interpolateGlyph(self.glyphName, self.normalizedWght)
         if result is None:
             return
-        glyphName, g, mathGlyph, designValue, normalizedValue = result
-        transform = self._currentTransform()
+        mathGlyph, designValue = result
 
-        # Retrieve the color stored for the selected block
+        # Preserve existing block color
         existingColor = None
-        objLibs = g.lib.get(OBJECT_LIBS_KEY, {})
-        for c in g.contours:
-            if c.identifier:
-                m = objLibs.get(c.identifier, {})
-                if m.get(BLOCK_ID_KEY) == self._selectedBlockID:
-                    existingColor = m.get(BLOCK_COLOR_KEY)
-                    break
+        blocks = _getBlocksFromGlyph(g)
+        blockInfo = blocks.get(self._selectedBlockID)
+        if blockInfo:
+            existingColor = blockInfo["meta"].get(BLOCK_COLOR_KEY)
 
         g.prepareUndo("Update Block")
         _removeBlockContours(g, self._selectedBlockID)
         _insertTaggedContours(
-            g, mathGlyph, self._wghtAxis, designValue, normalizedValue,
-            self._dsRelPath, glyphName, transform,
-            color=existingColor,
-            blockID=self._selectedBlockID,
+            g, mathGlyph, self._dsManager.wghtAxis, designValue,
+            self.normalizedWght, self._dsManager.currentRelPath,
+            self.glyphName, self.transform,
+            color=existingColor, blockID=self._selectedBlockID,
         )
         g.performUndo()
+        self._requestRedraw(g)
 
-        if _TOOL_INSTANCE is not None:
-            _TOOL_INSTANCE._drawBlocks(g)
-            _TOOL_INSTANCE._drawHandles(g, self._selectedBlockID)
-
-    def _insertNewBlock(self) -> None:
-        """Insert a brand-new block with the current panel settings.
-
-        Never removes or touches existing blocks.
-        """
-        result = self._resolveGlyph()
+    def insertNewBlock(self) -> None:
+        """Insert a brand-new block with the current panel settings."""
+        g = CurrentGlyph()
+        if g is None:
+            return
+        result = self._dsManager.interpolateGlyph(self.glyphName, self.normalizedWght)
         if result is None:
             return
-        glyphName, g, mathGlyph, designValue, normalizedValue = result
-        transform = self._currentTransform()
+        mathGlyph, designValue = result
 
         g.prepareUndo("Insert Block")
         newIds = _insertTaggedContours(
-            g, mathGlyph, self._wghtAxis, designValue, normalizedValue,
-            self._dsRelPath, glyphName, transform,
+            g, mathGlyph, self._dsManager.wghtAxis, designValue,
+            self.normalizedWght, self._dsManager.currentRelPath,
+            self.glyphName, self.transform,
         )
         g.performUndo()
 
-        # Select the freshly created block so sliders now update it live
         if newIds:
             objLibs = g.lib.get(OBJECT_LIBS_KEY, {})
             self._selectedBlockID = objLibs.get(newIds[0], {}).get(BLOCK_ID_KEY)
+        self._requestRedraw(g)
 
-        if _TOOL_INSTANCE is not None:
-            _TOOL_INSTANCE._drawBlocks(g)
-            _TOOL_INSTANCE._drawHandles(g, self._selectedBlockID)
-
-    # -----------------------------------------------------------------------
-    # Callbacks
-    # -----------------------------------------------------------------------
-
-    def glyphNameFieldCallback(self, sender):
-        """Live-update the selected block when the glyph name is committed."""
-        self._updateSelectedBlock()
-
-    def xFieldCallback(self, sender):
-        """Live-update the selected block at the new X offset."""
-        self._updateSelectedBlock()
-
-    def yFieldCallback(self, sender):
-        """Live-update the selected block at the new Y offset."""
-        self._updateSelectedBlock()
-
-    def scaleXSliderCallback(self, sender):
-        """Live-update the selected block at the new horizontal scale."""
-        self._updateSelectedBlock()
-
-    def scaleYSliderCallback(self, sender):
-        """Live-update the selected block at the new vertical scale."""
-        self._updateSelectedBlock()
-
-    def wghtSliderCallback(self, sender):
-        """Live-update the selected block as the slider is dragged."""
-        self._updateSelectedBlock()
-
-    def insertButtonCallback(self, sender):
-        """Insert a new independent block with the current panel settings."""
-        self._insertNewBlock()
-
-    def removeButtonCallback(self, sender):
+    def removeSelectedBlock(self) -> None:
+        """Remove the currently selected block."""
+        if self._selectedBlockID is None:
+            return
         g = CurrentGlyph()
         if g is None:
             return
         g.prepareUndo("Remove Block")
-        if self._selectedBlockID is not None:
-            removed = _removeBlockContours(g, self._selectedBlockID)
-            self._selectedBlockID = None
-        else:
-            removed = _removeTaggedContours(g)
+        _removeBlockContours(g, self._selectedBlockID)
+        self._selectedBlockID = None
         g.performUndo()
-        print(f"Removed {removed} tagged contour(s)")
-        if _TOOL_INSTANCE is not None:
-            _TOOL_INSTANCE._drawBlocks(g)
-            _TOOL_INSTANCE._clearHandles()
+        self._requestRedraw(g)
 
     # -----------------------------------------------------------------------
-    # UI state helpers (called by InterpTool on hit-test)
+    # UI state
     # -----------------------------------------------------------------------
-
-    def setEnabled(self, enabled: bool) -> None:
-        """Enable or disable all editing controls."""
-        for name in _PANEL_CONTROLS:
-            self.w.getItem(name).enable(enabled)
 
     def setDefaults(self) -> None:
-        """Clear selection and reset all controls to their initial default values."""
+        """Reset all controls to initial values and deselect."""
         self._selectedBlockID = None
         self.w.getItem("glyphNameField").set(DEFAULT_GLYPH_NAME)
         self.w.getItem("wghtSlider").set(0.6)
-        self.w.getItem("scaleXSlider").set(100)
-        self.w.getItem("scaleYSlider").set(100)
-        self.w.getItem("xField").set("0")
-        self.w.getItem("yField").set("0")
+        self.scalePercent = (100, 100)
+        self.offset = (0, 0)
 
-    def setFromBlock(self, meta: dict) -> None:
-        """Select this block and populate all controls from its stored metadata.
-
-        Also switches the active designspace to the one the block was created
-        with, so that subsequent slider updates re-interpolate from the correct
-        source.
-        """
+    def selectBlock(self, meta: dict) -> None:
+        """Populate all controls from a block's stored metadata and switch DS."""
         self._selectedBlockID = meta.get(BLOCK_ID_KEY)
 
-        # Switch designspace if the block was created from a different one
+        # Switch designspace to match the block
         dsRelPath = meta.get(CONTOUR_SOURCE_KEY)
         if dsRelPath:
             dsAbsPath = os.path.normpath(os.path.join(SCRIPT_DIR, dsRelPath))
@@ -628,92 +652,138 @@ class TransmutorController(ezui.WindowController):
         glyphName = meta.get(f"{LIB_PREFIX}.glyphName", DEFAULT_GLYPH_NAME)
         self.w.getItem("glyphNameField").set(glyphName)
 
-        # Normalized wght value (first — and only — axis tag in the dict)
         normalizedLoc = meta.get(f"{LIB_PREFIX}.normalizedLocation", {})
         wght = next(iter(normalizedLoc.values()), 0.6)
         self.w.getItem("wghtSlider").set(wght)
 
-        # Affine transform: [xx, xy, yx, yy, dx, dy]
         transform = meta.get(f"{LIB_PREFIX}.transform", [1, 0, 0, 1, 0, 0])
         xx, _xy, _yx, yy, dx, dy = transform
-        self.w.getItem("scaleXSlider").set(round(xx * 100))
-        self.w.getItem("scaleYSlider").set(round(yy * 100))
-        self.w.getItem("xField").set(str(int(dx)))
-        self.w.getItem("yField").set(str(int(dy)))
+        self.scalePercent = (round(xx * 100), round(yy * 100))
+        self.offset = (int(dx), int(dy))
+
+    def snapToIntegers(self) -> None:
+        """Round scale and offset to clean integers (called after scale drag)."""
+        sx, sy = self.scalePercent
+        self.scalePercent = (int(round(sx)), int(round(sy)))
+        # offset getter already rounds via float parse
+        self.offset = self.offset
+
+    # -----------------------------------------------------------------------
+    # Redraw delegation
+    # -----------------------------------------------------------------------
+
+    def _requestRedraw(self, glyph) -> None:
+        """Ask the registered tool to refresh Merz layers."""
+        if self._tool is not None:
+            self._tool.drawBlocks(glyph)
+            self._tool.drawHandles(glyph, self._selectedBlockID)
+
+    # -----------------------------------------------------------------------
+    # EZUI callbacks
+    # -----------------------------------------------------------------------
+
+    def designspacePopupButtonCallback(self, sender):
+        """Respond to popup selection: open file picker or switch DS."""
+        if sender.getItem() == "Choose a Designspace ...":
+            self._openDesignSpace()
+        else:
+            idx = sender.get()
+            paths = self._dsManager.paths
+            if 0 <= idx < len(paths):
+                self.loadDesignSpace(paths[idx])
+
+    def glyphNameFieldCallback(self, sender):
+        self.updateSelectedBlock()
+
+    def xFieldCallback(self, sender):
+        self.updateSelectedBlock()
+
+    def yFieldCallback(self, sender):
+        self.updateSelectedBlock()
+
+    def scaleXSliderCallback(self, sender):
+        self.updateSelectedBlock()
+
+    def scaleYSliderCallback(self, sender):
+        self.updateSelectedBlock()
+
+    def wghtSliderCallback(self, sender):
+        self.updateSelectedBlock()
+
+    def insertButtonCallback(self, sender):
+        self.insertNewBlock()
+
+    def removeButtonCallback(self, sender):
+        self.removeSelectedBlock()
 
 
 # ---------------------------------------------------------------------------
-# Glyph view event tool
+# Tool — TransmutorTool (BaseEventTool)
 # ---------------------------------------------------------------------------
 
 class TransmutorTool(BaseEventTool):
-    """BaseEventTool that drives the TransmutorController panel.
+    """Glyph view event tool that drives the TransmutorController panel.
 
-    The panel is created lazily on first activation. Subsequent activate /
-    deactivate calls simply show / hide the existing window so the current
-    slider values and glyph name are preserved.
+    Handles mouse interaction (block selection, drag-to-move, handle-to-scale)
+    and Merz layer rendering (block outlines, selection handles).
     """
 
     _controller = None
+
+    # Drag state — offset movement
     _dragging = False
     _dragStartPoint = None
     _dragStartOffset = None
-    # Scaling state — populated on mouseDown when a handle is hit
-    _scalingHandle = None        # compass name of the active handle (or None)
-    _scalingAnchor = None        # (ax, ay) fixed anchor point in glyph coords
-    _scalingHandleXY = None      # (hx, hy) handle position at drag start
-    _scalingStartScaleX = None   # scaleX percentage at drag start
-    _scalingStartScaleY = None   # scaleY percentage at drag start
-    _scalingStartOffset = None   # (dx, dy) at drag start
+
+    # Drag state — handle scaling
+    _scalingHandle = None
+    _scalingAnchor = None
+    _scalingHandleXY = None
+    _scalingStartScaleX = None
+    _scalingStartScaleY = None
+    _scalingStartOffset = None
 
     def getToolbarTip(self) -> str:
         return "Transmutor"
 
+    # -----------------------------------------------------------------------
+    # Lifecycle
+    # -----------------------------------------------------------------------
+
     def becomeActive(self) -> None:
-        """Register as the active tool instance, show/create the panel, draw existing blocks."""
-        global _TOOL_INSTANCE
-        _TOOL_INSTANCE = self
+        """Show/create the panel, register as the active tool, draw blocks."""
         if self._controller is None:
-            self._controller = InterpController()
+            self._controller = TransmutorController()
         else:
             self._controller.w.show()
+        self._controller.setTool(self)
         g = CurrentGlyph()
         if g is not None:
             self._registerGlyphDesignSpaces(g)
-            self._drawBlocks(g)
+            self.drawBlocks(g)
 
     def becomeInactive(self) -> None:
-        """Deregister, hide panel, and clear all Merz layers."""
-        global _TOOL_INSTANCE
-        _TOOL_INSTANCE = None
+        """Hide the panel and clear all Merz layers."""
         if self._controller is not None:
+            self._controller.setTool(None)
             self._controller.w.hide()
-        self.extensionContainer(
-            "co.ohnotype.transmutor", location="background", clear=True
-        )
+        self.extensionContainer(_MERZ_BG_ID, location="background", clear=True)
         self._clearHandles()
 
     def currentGlyphChanged(self) -> None:
-        """Redraw block outlines when the user switches to a different glyph."""
-        # Deselect any block — it belongs to the previous glyph
+        """Deselect and redraw when switching to a different glyph."""
         if self._controller is not None:
             self._controller.setDefaults()
         self._clearHandles()
         g = CurrentGlyph()
         if g is not None:
             self._registerGlyphDesignSpaces(g)
-            self._drawBlocks(g)
+            self.drawBlocks(g)
         else:
-            self.extensionContainer(
-                "co.ohnotype.transmutor", location="background", clear=True
-            )
+            self.extensionContainer(_MERZ_BG_ID, location="background", clear=True)
 
     def _registerGlyphDesignSpaces(self, glyph) -> None:
-        """Add any designspace paths referenced by blocks in glyph to the popup.
-
-        Called on tool activation and on glyph change so the dropdown always
-        reflects every DS that is represented in the current glyph's blocks.
-        """
+        """Ensure all DS paths referenced by glyph blocks are in the popup."""
         if self._controller is None:
             return
         for info in _getBlocksFromGlyph(glyph).values():
@@ -722,10 +792,14 @@ class TransmutorTool(BaseEventTool):
                 dsAbsPath = os.path.normpath(os.path.join(SCRIPT_DIR, dsRelPath))
                 self._controller.addDesignSpace(dsAbsPath)
 
-    def _drawBlocks(self, glyph) -> None:
-        """Repaint the background Merz layer with colored outlines for every block."""
+    # -----------------------------------------------------------------------
+    # Merz drawing
+    # -----------------------------------------------------------------------
+
+    def drawBlocks(self, glyph) -> None:
+        """Repaint background outlines for every block."""
         container = self.extensionContainer(
-            "co.ohnotype.transmutor", location="background", clear=True
+            _MERZ_BG_ID, location="background", clear=True
         )
         for _blockID, info in _getBlocksFromGlyph(glyph).items():
             color = info["meta"].get(BLOCK_COLOR_KEY)
@@ -738,23 +812,13 @@ class TransmutorTool(BaseEventTool):
                     strokeColor=strokeColor,
                     strokeWidth=BLOCK_STROKE_WIDTH,
                 )
-                # layer.appendFilter(dict(
-                #     name="blockBlur",
-                #     filterType="gaussianBlur",
-                #     radius=BLOCK_BLUR_RADIUS,
-                # ))
                 pen = layer.getPen()
                 contour.draw(pen)
 
-    def _drawHandles(self, glyph, blockID: str) -> None:
-        """Draw a dashed selection box and 8 corner/midpoint handles for blockID.
-
-        Uses a separate foreground container ("co.ohnotype.transmutor.handles") so
-        handles sit on top of all glyph content.  The box is stroked with the
-        block's color at OUTLINE_ALPHA; handles are filled at full opacity.
-        """
+    def drawHandles(self, glyph, blockID: str) -> None:
+        """Draw a dashed selection box and 8 handles for the given block."""
         container = self.extensionContainer(
-            "co.ohnotype.transmutor.handles", location="foreground", clear=True
+            _MERZ_FG_ID, location="foreground", clear=True
         )
         if glyph is None or blockID is None:
             return
@@ -763,26 +827,20 @@ class TransmutorTool(BaseEventTool):
         info = blocks.get(blockID)
         if info is None:
             return
-
         bounds = _unionBounds(info["contours"])
         if bounds is None:
             return
-
         color = info["meta"].get(BLOCK_COLOR_KEY)
         if not color:
             return
-        r, g, b = color[0], color[1], color[2]
-        strokeColor = (r, g, b, 1.0)
-        handleColor = (r, g, b, 1.0)
 
+        r, g, b = color[0], color[1], color[2]
         xMin, yMin, xMax, yMax = bounds
-        midX = (xMin + xMax) / 2
-        midY = (yMin + yMax) / 2
 
         # Dashed bounding box
         boxLayer = container.appendPathSublayer(
             fillColor=None,
-            strokeColor=strokeColor,
+            strokeColor=(r, g, b, 1.0),
             strokeWidth=1.5,
         )
         boxLayer.setStrokeDash((5, 5))
@@ -794,38 +852,29 @@ class TransmutorTool(BaseEventTool):
         pen.closePath()
 
         # 8 handles at corners and edge midpoints
-        handlePositions = [
-            (xMin, yMin),   # SW
-            (midX, yMin),   # S
-            (xMax, yMin),   # SE
-            (xMax, midY),   # E
-            (xMax, yMax),   # NE
-            (midX, yMax),   # N
-            (xMin, yMax),   # NW
-            (xMin, midY),   # W
-        ]
-        for pos in handlePositions:
+        for pos in _handlePositions(bounds):
             container.appendSymbolSublayer(
                 position=pos,
                 imageSettings=dict(
                     name="rectangle",
                     size=(HANDLE_SIZE, HANDLE_SIZE),
-                    fillColor=handleColor,
+                    fillColor=(r, g, b, 1.0),
                 ),
             )
 
     def _clearHandles(self) -> None:
         """Remove all foreground selection handle layers."""
-        self.extensionContainer(
-            "co.ohnotype.transmutor.handles", location="foreground", clear=True
-        )
+        self.extensionContainer(_MERZ_FG_ID, location="foreground", clear=True)
+
+    # -----------------------------------------------------------------------
+    # Hit testing
+    # -----------------------------------------------------------------------
 
     def _hitTestHandles(self, point, glyph, blockID) -> str | None:
-        """Return the compass name of the handle nearest to point, or None.
+        """Return compass name of the handle at point, or None.
 
-        The hit radius is HANDLE_SIZE screen-pixels converted to glyph units
-        via the current view scale, matching the backup's _ptOnHandle approach
-        so the target is always ~HANDLE_SIZE pixels wide regardless of zoom.
+        Hit radius is HANDLE_SIZE screen-pixels converted to glyph units
+        via the current view scale.
         """
         if glyph is None or blockID is None:
             return None
@@ -837,155 +886,132 @@ class TransmutorTool(BaseEventTool):
         if bounds is None:
             return None
 
-        xMin, yMin, xMax, yMax = bounds
-        midX = (xMin + xMax) / 2
-        midY = (yMin + yMax) / 2
-
-        handlePositions = [
-            (xMin, yMin),   # SW
-            (midX, yMin),   # S
-            (xMax, yMin),   # SE
-            (xMax, midY),   # E
-            (xMax, yMax),   # NE
-            (midX, yMax),   # N
-            (xMin, yMax),   # NW
-            (xMin, midY),   # W
-        ]
-
         viewScale = CurrentGlyphWindow().getGlyphViewScale()
         hitRadius = HANDLE_SIZE * (1.0 / viewScale)
 
-        for name, (hx, hy) in zip(_HANDLE_NAMES, handlePositions):
+        for name, (hx, hy) in zip(_HANDLE_NAMES, _handlePositions(bounds)):
             if abs(point.x - hx) <= hitRadius and abs(point.y - hy) <= hitRadius:
                 return name
         return None
 
-    def mouseDown(self, point, clickCount: int) -> None:
-        """Hit-test tagged blocks and update the panel accordingly.
+    def _hitTestBlocks(self, point, glyph):
+        """Return (blockID, meta) for the first block hit, or None."""
+        for blockID, info in _getBlocksFromGlyph(glyph).items():
+            bounds = _unionBounds(info["contours"])
+            if _pointInBounds(point, bounds):
+                return blockID, info["meta"]
+        return None
 
-        If the click lands inside the bounding box of a block's contours the
-        panel controls are enabled and populated from that block's lib data.
-        Any click outside every block resets controls to defaults and disables
-        them.
-        """
+    # -----------------------------------------------------------------------
+    # Mouse events
+    # -----------------------------------------------------------------------
+
+    def mouseDown(self, point, clickCount: int) -> None:
+        """Hit-test handles, then blocks, then deselect on miss."""
         if self._controller is None:
             return
         g = CurrentGlyph()
         if g is None:
             return
 
-        # Handle hit-test takes priority when a block is already selected
-        selectedID = self._controller._selectedBlockID
+        # Priority 1: handle hit on already-selected block
+        selectedID = self._controller.selectedBlockID
         if selectedID is not None:
             handleName = self._hitTestHandles(point, g, selectedID)
             if handleName is not None:
-                info = _HANDLE_SCALING_INFO[handleName]
-                blocks = _getBlocksFromGlyph(g)
-                bounds = _unionBounds(blocks[selectedID]["contours"])
-                xMin, yMin, xMax, yMax = bounds
-
-                def _lerp(a: float, b: float, t: float) -> float:
-                    return a + (b - a) * t
-
-                hu, hv = info["handleNorm"]
-                au, av = info["anchorNorm"]
-                self._scalingHandle = handleName
-                self._scalingHandleXY = (_lerp(xMin, xMax, hu), _lerp(yMin, yMax, hv))
-                self._scalingAnchor = (_lerp(xMin, xMax, au), _lerp(yMin, yMax, av))
-                self._scalingStartScaleX = float(self._controller.w.getItem("scaleXSlider").get())
-                self._scalingStartScaleY = float(self._controller.w.getItem("scaleYSlider").get())
-                # Store offset as floats so rounding doesn't compound during drag
-                ox, oy = self._controller._currentOffset()
-                self._scalingStartOffset = (float(ox), float(oy))
-                print(f"mouseDown — handle '{handleName}'  block {selectedID[:8]}…  anchor: ({self._scalingAnchor[0]:.1f}, {self._scalingAnchor[1]:.1f})")
+                self._beginScaleDrag(handleName, g, selectedID)
                 return
 
-        blocks = _getBlocksFromGlyph(g)
-        for blockID, info in blocks.items():
-            bounds = _unionBounds(info["contours"])
-            if _pointInBounds(point, bounds):
-                self._controller.setFromBlock(info["meta"])
-                self._drawHandles(g, blockID)
-                self._dragging = True
-                self._dragStartPoint = (point.x, point.y)
-                # Capture the current offset as the drag origin
-                ox, oy = self._controller._currentOffset()
-                self._dragStartOffset = (ox, oy)
-                print(f"mouseDown — block {blockID[:8]}…  x: {point.x:.2f}  y: {point.y:.2f}")
-                return
+        # Priority 2: block body hit
+        hit = self._hitTestBlocks(point, g)
+        if hit is not None:
+            blockID, meta = hit
+            self._controller.selectBlock(meta)
+            self.drawHandles(g, blockID)
+            self._beginOffsetDrag(point)
+            return
 
-        # Click outside all blocks — deselect, reset staging values
+        # Miss — deselect
         self._dragging = False
         self._controller.setDefaults()
         self._clearHandles()
-        print(f"mouseDown — no block  x: {point.x:.2f}  y: {point.y:.2f}")
+
+    def _beginScaleDrag(self, handleName: str, glyph, blockID: str) -> None:
+        """Capture all state needed for a handle-scaling drag."""
+        info = _HANDLE_SCALING_INFO[handleName]
+        blocks = _getBlocksFromGlyph(glyph)
+        bounds = _unionBounds(blocks[blockID]["contours"])
+        xMin, yMin, xMax, yMax = bounds
+
+        hu, hv = info["handleNorm"]
+        au, av = info["anchorNorm"]
+        self._scalingHandle = handleName
+        self._scalingHandleXY = (_lerp(xMin, xMax, hu), _lerp(yMin, yMax, hv))
+        self._scalingAnchor = (_lerp(xMin, xMax, au), _lerp(yMin, yMax, av))
+        sx, sy = self._controller.scalePercent
+        self._scalingStartScaleX = float(sx)
+        self._scalingStartScaleY = float(sy)
+        ox, oy = self._controller.offset
+        self._scalingStartOffset = (float(ox), float(oy))
+
+    def _beginOffsetDrag(self, point) -> None:
+        """Capture state for a block-body offset drag."""
+        self._dragging = True
+        self._dragStartPoint = (point.x, point.y)
+        ox, oy = self._controller.offset
+        self._dragStartOffset = (ox, oy)
 
     def mouseDragged(self, point, delta) -> None:
-        """Handle dragging.
-
-        - Scale drag: active when a handle was hit on mouseDown.
-          The anchor point stays fixed; the dragged handle follows the mouse,
-          updating scaleX/Y (and offset to keep the anchor pinned).
-        - Offset drag: active when the block body was hit on mouseDown.
-          Movement is clamped to the nearest 45° axis when Shift is held.
-        """
+        """Route to scale or offset drag handler."""
         if self._controller is None:
             return
-
-        # ---- scale drag ----
         if self._scalingHandle is not None:
-            info = _HANDLE_SCALING_INFO[self._scalingHandle]
-            ax, ay = self._scalingAnchor
-            hx, hy = self._scalingHandleXY
-            dx0, dy0 = self._scalingStartOffset
-            sx0 = self._scalingStartScaleX
-            sy0 = self._scalingStartScaleY
+            self._handleScaleDrag(point)
+        elif self._dragging:
+            self._handleOffsetDrag(point)
 
-            # Compute scale factors from anchor-relative distances
-            distH0 = hx - ax
-            distV0 = hy - ay
-            distHNow = point.x - ax
-            distVNow = point.y - ay
+    def _handleScaleDrag(self, point) -> None:
+        """Compute new scale + offset from handle drag and push to controller."""
+        info = _HANDLE_SCALING_INFO[self._scalingHandle]
+        ax, ay = self._scalingAnchor
+        hx, hy = self._scalingHandleXY
+        dx0, dy0 = self._scalingStartOffset
+        sx0 = self._scalingStartScaleX
+        sy0 = self._scalingStartScaleY
 
-            factor_H = (distHNow / distH0) if (info["scaleH"] and distH0 != 0) else 1.0
-            factor_V = (distVNow / distV0) if (info["scaleV"] and distV0 != 0) else 1.0
+        distH0 = hx - ax
+        distV0 = hy - ay
+        factor_H = ((point.x - ax) / distH0) if (info["scaleH"] and distH0 != 0) else 1.0
+        factor_V = ((point.y - ay) / distV0) if (info["scaleV"] and distV0 != 0) else 1.0
 
-            # Shift constrains X = Y: the axis with the larger deviation leads
-            if self.shiftDown and info["scaleH"] and info["scaleV"]:
-                if abs(factor_H - 1.0) >= abs(factor_V - 1.0):
-                    factor_V = factor_H
-                else:
-                    factor_H = factor_V
+        # Shift constrains proportional scaling on corner handles
+        if self.shiftDown and info["scaleH"] and info["scaleV"]:
+            if abs(factor_H - 1.0) >= abs(factor_V - 1.0):
+                factor_V = factor_H
+            else:
+                factor_H = factor_V
 
-            # No rounding during drag — keep full float precision for smooth movement
-            newScaleX = max(1.0, min(200.0, sx0 * factor_H))
-            newScaleY = max(1.0, min(200.0, sy0 * factor_V))
+        newScaleX = max(1.0, min(200.0, sx0 * factor_H))
+        newScaleY = max(1.0, min(200.0, sy0 * factor_V))
 
-            # Keep the anchor pinned: newOffset = anchor*(1 - factor) + oldOffset*factor
-            newDx = ax * (1.0 - factor_H) + dx0 * factor_H if info["scaleH"] else dx0
-            newDy = ay * (1.0 - factor_V) + dy0 * factor_V if info["scaleV"] else dy0
+        # Keep the anchor pinned: newOffset = anchor*(1 - factor) + oldOffset*factor
+        newDx = ax * (1.0 - factor_H) + dx0 * factor_H if info["scaleH"] else dx0
+        newDy = ay * (1.0 - factor_V) + dy0 * factor_V if info["scaleV"] else dy0
 
-            w = self._controller.w
-            w.getItem("scaleXSlider").set(newScaleX)
-            w.getItem("scaleYSlider").set(newScaleY)
-            # Store precise floats in the fields so _currentTransform() is exact
-            w.getItem("xField").set(f"{newDx:.4f}")
-            w.getItem("yField").set(f"{newDy:.4f}")
-            self._controller._updateSelectedBlock()
-            return
+        self._controller.scalePercent = (newScaleX, newScaleY)
+        # Store precise floats so rounding doesn't accumulate across frames
+        self._controller.offset = (f"{newDx:.4f}", f"{newDy:.4f}")
+        self._controller.updateSelectedBlock()
 
-        # ---- offset drag ----
-        if not self._dragging:
-            return
+    def _handleOffsetDrag(self, point) -> None:
+        """Compute new offset from body drag and push to controller."""
         if self._dragStartPoint is None or self._dragStartOffset is None:
             return
 
-        # Total displacement from where the drag began
         rawDx = point.x - self._dragStartPoint[0]
         rawDy = point.y - self._dragStartPoint[1]
 
         if self.shiftDown and (rawDx != 0 or rawDy != 0):
-            # Snap displacement to the nearest 45° direction
             magnitude = math.hypot(rawDx, rawDy)
             angle = math.atan2(rawDy, rawDx)
             snappedAngle = round(angle / (math.pi / 4)) * (math.pi / 4)
@@ -994,16 +1020,19 @@ class TransmutorTool(BaseEventTool):
 
         newX = int(round(self._dragStartOffset[0] + rawDx))
         newY = int(round(self._dragStartOffset[1] + rawDy))
-
-        w = self._controller.w
-        w.getItem("xField").set(str(newX))
-        w.getItem("yField").set(str(newY))
-        self._controller._updateSelectedBlock()
+        self._controller.offset = (newX, newY)
+        self._controller.updateSelectedBlock()
 
     def mouseUp(self, point) -> None:
-        """End any active drag (offset or scale), snapping float values to integers."""
+        """End any active drag, snapping float values to integers."""
         wasScaling = self._scalingHandle is not None
+        self._clearDragState()
+        if wasScaling and self._controller is not None:
+            self._controller.snapToIntegers()
+            self._controller.updateSelectedBlock()
 
+    def _clearDragState(self) -> None:
+        """Reset all transient drag state."""
         self._dragging = False
         self._dragStartPoint = None
         self._dragStartOffset = None
@@ -1014,17 +1043,5 @@ class TransmutorTool(BaseEventTool):
         self._scalingStartScaleY = None
         self._scalingStartOffset = None
 
-        # Round float drag values to clean integers once the user releases
-        if wasScaling and self._controller is not None:
-            w = self._controller.w
-            sx = int(round(w.getItem("scaleXSlider").get()))
-            sy = int(round(w.getItem("scaleYSlider").get()))
-            dx, dy = self._controller._currentOffset()  # already rounds via float parse
-            w.getItem("scaleXSlider").set(sx)
-            w.getItem("scaleYSlider").set(sy)
-            w.getItem("xField").set(str(dx))
-            w.getItem("yField").set(str(dy))
-            self._controller._updateSelectedBlock()
 
-
-installTool(InterpTool())
+installTool(TransmutorTool())
