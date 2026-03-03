@@ -19,7 +19,6 @@ import uuid
 
 import ezui
 from AppKit import NSMenuItem
-from fontTools.designspaceLib import DesignSpaceDocument
 from mojo.events import BaseEventTool, installTool
 from ufoProcessor.ufoOperator import UFOOperator
 from mojo.UI import CurrentGlyphWindow, GetFile
@@ -160,6 +159,18 @@ def _normalizedToDesign(axis, normalizedValue: float) -> float:
     return axis.map_forward(userValue)
 
 
+def _userToNormalized(axis, userValue: float) -> float:
+    """Convert a user-space axis value to the slider's normalized [0, 1] range.
+
+    The slider maps 0 -> axis.default and 1 -> axis.maximum.
+    Values below default clamp to 0; values above maximum clamp to 1.
+    """
+    denom = axis.maximum - axis.default
+    if denom == 0:
+        return 0.0
+    return max(0.0, min(1.0, (userValue - axis.default) / denom))
+
+
 # ---------------------------------------------------------------------------
 # Block CRUD — pure glyph-level operations
 # ---------------------------------------------------------------------------
@@ -195,14 +206,35 @@ def _removeBlockContours(glyph, blockID: str) -> int:
     return len(toRemove)
 
 
-def _insertTaggedContours(glyph, glyphMathObj, axis, designValue: float,
-                          normalizedValue: float, dsRelPath: str,
+def _scrubOrphanedObjectLibs(glyph) -> int:
+    """Remove public.objectLibs entries whose contour identifiers no longer exist.
+
+    Returns the number of stale entries removed.
+    """
+    objectLibs = glyph.lib.get(OBJECT_LIBS_KEY)
+    if not objectLibs:
+        return 0
+    liveIds = {c.identifier for c in glyph.contours if c.identifier}
+    stale = [k for k in objectLibs if k not in liveIds]
+    if not stale:
+        return 0
+    cleaned = dict(objectLibs)
+    for k in stale:
+        del cleaned[k]
+    glyph.lib[OBJECT_LIBS_KEY] = cleaned
+    return len(stale)
+
+
+def _insertTaggedContours(glyph, glyphMathObj, location: dict,
+                          normalizedLocation: dict, dsRelPath: str,
                           glyphName: str,
                           transform: tuple = (1, 0, 0, 1, 0, 0),
                           color: list = None,
                           blockID: str = None) -> list:
     """Draw interpolated contours into glyph, apply transform, tag in objectLibs.
 
+    location:           {axisName: designValue, ...}
+    normalizedLocation: {axisTag: normalizedValue, ...}
     Returns list of new contour identifiers.
     """
     if color is None:
@@ -223,8 +255,8 @@ def _insertTaggedContours(glyph, glyphMathObj, axis, designValue: float,
         BLOCK_ID_KEY: blockID,
         BLOCK_COLOR_KEY: color,
         f"{LIB_PREFIX}.glyphName": glyphName,
-        f"{LIB_PREFIX}.location": {axis.name: designValue},
-        f"{LIB_PREFIX}.normalizedLocation": {axis.tag: normalizedValue},
+        f"{LIB_PREFIX}.location": dict(location),
+        f"{LIB_PREFIX}.normalizedLocation": dict(normalizedLocation),
         f"{LIB_PREFIX}.transform": list(transform),
     }
     newIds = []
@@ -252,9 +284,12 @@ class DesignSpaceManager:
     def __init__(self):
         self._paths = []         # ordered list of absolute, normalised paths
         self._wghtAxis = None
+        self._wdthAxis = None
         self._op = None
         self._dsRelPath = None
         self._dsPath = None
+        self._dsDir = None
+        self._dsSources = []
         self._defaultFont = None
 
     # ---- Properties ----
@@ -285,6 +320,16 @@ class DesignSpaceManager:
     def wghtAxis(self):
         """The wght axis descriptor, or None."""
         return self._wghtAxis
+
+    @property
+    def wdthAxis(self):
+        """The wdth axis descriptor, or None."""
+        return self._wdthAxis
+
+    @property
+    def hasWdth(self) -> bool:
+        """True if the loaded designspace has a wdth axis."""
+        return self._wdthAxis is not None
 
     # ---- Path management ----
 
@@ -321,10 +366,13 @@ class DesignSpaceManager:
         if path == self._dsPath:
             return True
         try:
-            ds = DesignSpaceDocument.fromfile(path)
-            self._wghtAxis = next((a for a in ds.axes if a.tag == "wght"), None)
             self._op = UFOOperator(path, useVarlib=False)
             self._op.loadFonts()
+            ds = self._op.doc
+            self._wghtAxis = next((a for a in ds.axes if a.tag == "wght"), None)
+            self._wdthAxis = next((a for a in ds.axes if a.tag == "wdth"), None)
+            self._dsSources = ds.sources
+            self._dsDir = os.path.dirname(path)
             self._dsRelPath = os.path.relpath(path, SCRIPT_DIR)
             self._dsPath = path
             self._defaultFont = self._op.findDefaultFont()
@@ -335,23 +383,69 @@ class DesignSpaceManager:
 
     # ---- Interpolation ----
 
-    def interpolateGlyph(self, glyphName: str, normalizedValue: float):
-        """Return (mathGlyph, designValue) or None if interpolation fails."""
+    def interpolateGlyph(self, glyphName: str, normalizedLocation: dict):
+        """Return (mathGlyph, designLocation) or None if interpolation fails.
+
+        normalizedLocation: {axisTag: normalizedValue, ...}
+        designLocation:     {axisName: designValue, ...} in design-space units
+        """
         if not self.isLoaded:
             print("No designspace loaded — choose one from the popup.")
             return None
         if glyphName not in self._defaultFont:
             print(f"'{glyphName}' not found in default source.")
             return None
-        designValue = _normalizedToDesign(self._wghtAxis, normalizedValue)
-        location = {self._wghtAxis.name: designValue}
+
+        designLocation = {}
+        axisMap = {"wght": self._wghtAxis, "wdth": self._wdthAxis}
+        for tag, axis in axisMap.items():
+            if axis is not None and tag in normalizedLocation:
+                designLocation[axis.name] = _normalizedToDesign(
+                    axis, normalizedLocation[tag]
+                )
+
         mathGlyph = self._op.makeOneGlyph(
-            glyphName, location, decomposeComponents=False
+            glyphName, designLocation, decomposeComponents=False
         )
         if mathGlyph is None:
-            print(f"Could not interpolate '{glyphName}' at {location}")
+            print(f"Could not interpolate '{glyphName}' at {designLocation}")
             return None
-        return mathGlyph, designValue
+        return mathGlyph, designLocation
+
+    def defaultNormalizedLocation(self, fontPath: str = None) -> dict:
+        """Return the ideal default slider location for the given font.
+
+        If fontPath matches a source in the loaded designspace, returns
+        that source's position as normalized slider values.  Otherwise
+        returns axis defaults (0.0 for each axis, since slider 0 = default).
+        """
+        result = {"wght": 0.0}
+        if self._wdthAxis is not None:
+            result["wdth"] = 0.0
+
+        if not self.isLoaded or not fontPath:
+            return result
+
+        fontPath = os.path.normpath(os.path.abspath(fontPath))
+        for source in self._dsSources:
+            if not source.filename:
+                continue
+            srcPath = os.path.normpath(
+                os.path.join(self._dsDir, source.filename)
+            )
+            if srcPath == fontPath:
+                loc = source.location or {}
+                if self._wghtAxis and self._wghtAxis.name in loc:
+                    result["wght"] = _userToNormalized(
+                        self._wghtAxis, loc[self._wghtAxis.name]
+                    )
+                if self._wdthAxis and self._wdthAxis.name in loc:
+                    result["wdth"] = _userToNormalized(
+                        self._wdthAxis, loc[self._wdthAxis.name]
+                    )
+                break
+
+        return result
 
 
 # ---------------------------------------------------------------------------
@@ -379,6 +473,8 @@ class TransmutorController(ezui.WindowController):
         [__]                @glyphNameField
         : wght:
         ---X--- [__]        @wghtSlider
+        : wdth:
+        ---X--- [__]        @wdthSlider
         : Scale X:
         ---X--- [__]        @scaleXSlider
         : Scale Y:
@@ -407,6 +503,7 @@ class TransmutorController(ezui.WindowController):
             xField=dict(value="0", placeholder="X"),
             yField=dict(value="0", placeholder="Y"),
             wghtSlider=dict(minValue=0.0, maxValue=1.0, value=0.6),
+            wdthSlider=dict(minValue=0.0, maxValue=1.0, value=0.0),
             scaleXSlider=dict(minValue=1, maxValue=200, value=100),
             scaleYSlider=dict(minValue=1, maxValue=200, value=100),
         )
@@ -439,6 +536,8 @@ class TransmutorController(ezui.WindowController):
         # If no current DS but we have registered ones, load the first
         if not self._dsManager.isLoaded and self._dsManager.paths:
             self.loadDesignSpace(self._dsManager.paths[0])
+
+        self._syncAxisSliders()
 
     def started(self):
         self.w.open()
@@ -475,9 +574,15 @@ class TransmutorController(ezui.WindowController):
         return self.w.getItem("glyphNameField").get().strip()
 
     @property
-    def normalizedWght(self) -> float:
-        """Current normalised wght value from the slider."""
-        return self.w.getItem("wghtSlider").get()
+    def normalizedLocation(self) -> dict:
+        """Current normalised axis location from the sliders.
+
+        Returns {axisTag: normalizedValue} for all active axes.
+        """
+        loc = {"wght": self.w.getItem("wghtSlider").get()}
+        if self._dsManager.hasWdth:
+            loc["wdth"] = self.w.getItem("wdthSlider").get()
+        return loc
 
     @property
     def offset(self) -> tuple:
@@ -530,12 +635,32 @@ class TransmutorController(ezui.WindowController):
         self._refreshPopup()
 
     def loadDesignSpace(self, path: str) -> None:
-        """Load a designspace and sync the popup selection."""
+        """Load a designspace and sync the popup selection and axis sliders."""
         path = os.path.normpath(os.path.abspath(path))
         self._dsManager.load(path)
         idx = self._dsManager.indexForPath(path)
         if idx >= 0:
             self.w.getItem("designspacePopupButton").set(idx)
+        self._syncAxisSliders()
+
+    def _syncAxisSliders(self) -> None:
+        """Enable/disable axis sliders and set values based on current font."""
+        hasWdth = self._dsManager.hasWdth
+        self.w.getItem("wdthSlider").enable(hasWdth)
+
+        # Set slider values to current font's source position, or axis defaults
+        fontPath = self._currentFontPath()
+        defaults = self._dsManager.defaultNormalizedLocation(fontPath)
+        self.w.getItem("wghtSlider").set(defaults.get("wght", 0.0))
+        self.w.getItem("wdthSlider").set(defaults.get("wdth", 0.0))
+
+    def _currentFontPath(self) -> str:
+        """Return the path of the current font, or None."""
+        try:
+            font = CurrentFont()
+            return font.path if font else None
+        except Exception:
+            return None
 
     def _refreshPopup(self) -> None:
         """Rebuild popup items from the manager's path list."""
@@ -567,10 +692,11 @@ class TransmutorController(ezui.WindowController):
         g = CurrentGlyph()
         if g is None:
             return
-        result = self._dsManager.interpolateGlyph(self.glyphName, self.normalizedWght)
+        normLoc = self.normalizedLocation
+        result = self._dsManager.interpolateGlyph(self.glyphName, normLoc)
         if result is None:
             return
-        mathGlyph, designValue = result
+        mathGlyph, designLoc = result
 
         # Preserve existing block color
         existingColor = None
@@ -579,15 +705,13 @@ class TransmutorController(ezui.WindowController):
         if blockInfo:
             existingColor = blockInfo["meta"].get(BLOCK_COLOR_KEY)
 
-        g.prepareUndo("Update Block")
         _removeBlockContours(g, self._selectedBlockID)
         _insertTaggedContours(
-            g, mathGlyph, self._dsManager.wghtAxis, designValue,
-            self.normalizedWght, self._dsManager.currentRelPath,
+            g, mathGlyph, designLoc, normLoc,
+            self._dsManager.currentRelPath,
             self.glyphName, self.transform,
             color=existingColor, blockID=self._selectedBlockID,
         )
-        g.performUndo()
         self._requestRedraw(g)
 
     def insertNewBlock(self) -> None:
@@ -595,15 +719,16 @@ class TransmutorController(ezui.WindowController):
         g = CurrentGlyph()
         if g is None:
             return
-        result = self._dsManager.interpolateGlyph(self.glyphName, self.normalizedWght)
+        normLoc = self.normalizedLocation
+        result = self._dsManager.interpolateGlyph(self.glyphName, normLoc)
         if result is None:
             return
-        mathGlyph, designValue = result
+        mathGlyph, designLoc = result
 
         g.prepareUndo("Insert Block")
         newIds = _insertTaggedContours(
-            g, mathGlyph, self._dsManager.wghtAxis, designValue,
-            self.normalizedWght, self._dsManager.currentRelPath,
+            g, mathGlyph, designLoc, normLoc,
+            self._dsManager.currentRelPath,
             self.glyphName, self.transform,
         )
         g.performUndo()
@@ -634,7 +759,13 @@ class TransmutorController(ezui.WindowController):
         """Reset all controls to initial values and deselect."""
         self._selectedBlockID = None
         self.w.getItem("glyphNameField").set(DEFAULT_GLYPH_NAME)
-        self.w.getItem("wghtSlider").set(0.6)
+
+        # Set sliders to current font's source position, or axis defaults
+        fontPath = self._currentFontPath()
+        defaults = self._dsManager.defaultNormalizedLocation(fontPath)
+        self.w.getItem("wghtSlider").set(defaults.get("wght", 0.0))
+        self.w.getItem("wdthSlider").set(defaults.get("wdth", 0.0))
+
         self.scalePercent = (100, 100)
         self.offset = (0, 0)
 
@@ -653,8 +784,8 @@ class TransmutorController(ezui.WindowController):
         self.w.getItem("glyphNameField").set(glyphName)
 
         normalizedLoc = meta.get(f"{LIB_PREFIX}.normalizedLocation", {})
-        wght = next(iter(normalizedLoc.values()), 0.6)
-        self.w.getItem("wghtSlider").set(wght)
+        self.w.getItem("wghtSlider").set(normalizedLoc.get("wght", 0.6))
+        self.w.getItem("wdthSlider").set(normalizedLoc.get("wdth", 0.0))
 
         transform = meta.get(f"{LIB_PREFIX}.transform", [1, 0, 0, 1, 0, 0])
         xx, _xy, _yx, yy, dx, dy = transform
@@ -710,6 +841,9 @@ class TransmutorController(ezui.WindowController):
     def wghtSliderCallback(self, sender):
         self.updateSelectedBlock()
 
+    def wdthSliderCallback(self, sender):
+        self.updateSelectedBlock()
+
     def insertButtonCallback(self, sender):
         self.insertNewBlock()
 
@@ -763,7 +897,10 @@ class TransmutorTool(BaseEventTool):
             self.drawBlocks(g)
 
     def becomeInactive(self) -> None:
-        """Hide the panel and clear all Merz layers."""
+        """Hide the panel, scrub orphaned lib entries, and clear all Merz layers."""
+        g = CurrentGlyph()
+        if g is not None:
+            _scrubOrphanedObjectLibs(g)
         if self._controller is not None:
             self._controller.setTool(None)
             self._controller.w.hide()
@@ -777,6 +914,7 @@ class TransmutorTool(BaseEventTool):
         self._clearHandles()
         g = CurrentGlyph()
         if g is not None:
+            _scrubOrphanedObjectLibs(g)
             self._registerGlyphDesignSpaces(g)
             self.drawBlocks(g)
         else:
@@ -928,7 +1066,7 @@ class TransmutorTool(BaseEventTool):
             blockID, meta = hit
             self._controller.selectBlock(meta)
             self.drawHandles(g, blockID)
-            self._beginOffsetDrag(point)
+            self._beginOffsetDrag(point, g)
             return
 
         # Miss — deselect
@@ -938,6 +1076,7 @@ class TransmutorTool(BaseEventTool):
 
     def _beginScaleDrag(self, handleName: str, glyph, blockID: str) -> None:
         """Capture all state needed for a handle-scaling drag."""
+        glyph.prepareUndo("Scale Block")
         info = _HANDLE_SCALING_INFO[handleName]
         blocks = _getBlocksFromGlyph(glyph)
         bounds = _unionBounds(blocks[blockID]["contours"])
@@ -954,8 +1093,9 @@ class TransmutorTool(BaseEventTool):
         ox, oy = self._controller.offset
         self._scalingStartOffset = (float(ox), float(oy))
 
-    def _beginOffsetDrag(self, point) -> None:
+    def _beginOffsetDrag(self, point, glyph) -> None:
         """Capture state for a block-body offset drag."""
+        glyph.prepareUndo("Move Block")
         self._dragging = True
         self._dragStartPoint = (point.x, point.y)
         ox, oy = self._controller.offset
@@ -1026,10 +1166,15 @@ class TransmutorTool(BaseEventTool):
     def mouseUp(self, point) -> None:
         """End any active drag, snapping float values to integers."""
         wasScaling = self._scalingHandle is not None
+        wasDragging = self._dragging
         self._clearDragState()
         if wasScaling and self._controller is not None:
             self._controller.snapToIntegers()
             self._controller.updateSelectedBlock()
+        if (wasScaling or wasDragging):
+            g = CurrentGlyph()
+            if g is not None:
+                g.performUndo()
 
     def _clearDragState(self) -> None:
         """Reset all transient drag state."""
