@@ -747,6 +747,7 @@ class TransmutorController(ezui.WindowController):
             return
         g.prepareUndo("Remove Block")
         _removeBlockContours(g, self._selectedBlockID)
+        _scrubOrphanedObjectLibs(g)
         self._selectedBlockID = None
         g.performUndo()
         self._requestRedraw(g)
