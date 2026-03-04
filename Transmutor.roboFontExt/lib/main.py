@@ -253,6 +253,7 @@ def _insertTaggedContours(glyph, glyphMathObj,
                           scalePercent: tuple = None,
                           stemV: float = 100.0,
                           stemH: float = 50.0,
+                          linkStems: bool = True,
                           enabledSources: list = None) -> list:
     """Draw interpolated contours into glyph, apply offset, tag in objectLibs.
 
@@ -290,6 +291,7 @@ def _insertTaggedContours(glyph, glyphMathObj,
         meta[f"{LIB_PREFIX}.scalePercent"] = list(scalePercent)
         meta[f"{LIB_PREFIX}.stemV"] = stemV
         meta[f"{LIB_PREFIX}.stemH"] = stemH
+        meta[f"{LIB_PREFIX}.linkStems"] = linkStems
     if enabledSources is not None:
         meta[f"{LIB_PREFIX}.enabledSources"] = list(enabledSources)
     newIds = []
@@ -1113,10 +1115,12 @@ class TransmutorController(ezui.WindowController):
         self.w.getItem("linkStemsCheckbox").enable(active)
 
     def _updateStemSliderRanges(self) -> None:
-        """Update stem slider min/max to match the enabled sources' stem range.
+        """Update stem slider min/max based on the enabled sources' stem range.
 
-        Clamps the current slider value into the new range so it stays valid.
-        Called whenever the set of enabled sources changes.
+        The source min/max define normalized positions 0 and 1.  The slider is
+        extended to cover -1 … 2 in that same space so the user can push
+        beyond the source extremes.  Current values are clamped into the new
+        range.  Called whenever the set of enabled sources changes.
         """
         verbosePrint("TransmutorController::_updateStemSliderRanges")
         if not self._dsManager.isLoaded:
@@ -1128,14 +1132,15 @@ class TransmutorController(ezui.WindowController):
         ):
             item = self.w.getItem(itemName)
             cur = item.get()
-            # Update the underlying NSSlider range, then clamp the value.
-            try:
-                nsSlider = item.slider.getNSSlider()
-                nsSlider.setMinValue_(lo)
-                nsSlider.setMaxValue_(hi)
-            except AttributeError:
-                pass  # fallback: value is set below; range display may be off
-            item.set(max(lo, min(hi, cur)))
+            # Extend the slider to cover normalized -1 … 2:
+            #   span * -1  →  lo - span  (one full range below the minimum)
+            #   span *  2  →  hi + span  (one full range above the maximum)
+            span = hi - lo
+            extLo = lo - span
+            extHi = hi + span
+            item.setMinValue(extLo)
+            item.setMaxValue(extHi)
+            item.set(max(extLo, min(extHi, cur)))
 
     def _currentFontPath(self) -> str:
         """Return the path of the current font, or None."""
@@ -1213,6 +1218,7 @@ class TransmutorController(ezui.WindowController):
             color=existingColor, blockID=self._selectedBlockID,
             scalePercent=(sx, sy),
             stemV=stemV, stemH=stemH,
+            linkStems=self.linkStems,
             enabledSources=self._enabledSourceFiles(),
         )
         self._requestRedraw(g)
@@ -1243,6 +1249,7 @@ class TransmutorController(ezui.WindowController):
             self.glyphName, offset=(ox, oy),
             scalePercent=(sx, sy),
             stemV=stemV, stemH=stemH,
+            linkStems=self.linkStems,
             enabledSources=self._enabledSourceFiles(),
         )
         g.performUndo()
@@ -1350,7 +1357,7 @@ class TransmutorController(ezui.WindowController):
             normH = meta.get(f"{LIB_PREFIX}.stemRatioH", 0.0)
             stemV = minV + normV * (maxV - minV) if maxV != minV else minV
             stemH = minH + normH * (maxH - minH) if maxH != minH else minH
-        linked = abs(stemV - stemH) < 1.0
+        linked = meta.get(f"{LIB_PREFIX}.linkStems", True)
         self.stemValues = (stemV, stemH)
         self.w.getItem("linkStemsCheckbox").set(1 if linked else 0)
         self._syncStemControls()
@@ -1507,6 +1514,12 @@ class TransmutorTool(BaseEventTool):
     _scalingStartScaleX = None
     _scalingStartScaleY = None
     _scalingStartOffset = None
+
+    # Drag state — option-drag stem control
+    _stemDragging = False
+    _stemDragStartPoint = None
+    _stemDragStartV = None
+    _stemDragStartH = None
 
     def getToolbarTip(self) -> str:
         verbosePrint("TransmutorTool::getToolbarTip")
@@ -1710,7 +1723,10 @@ class TransmutorTool(BaseEventTool):
             blockID, meta = hit
             self._controller.selectBlock(meta)
             self.drawHandles(g, blockID)
-            self._beginOffsetDrag(point, g)
+            if self.optionDown:
+                self._beginStemDrag(point)
+            else:
+                self._beginOffsetDrag(point, g)
             return
 
         # Miss — deselect
@@ -1747,13 +1763,32 @@ class TransmutorTool(BaseEventTool):
         ox, oy = self._controller.offset
         self._dragStartOffset = (ox, oy)
 
+    def _beginStemDrag(self, point) -> None:
+        """Capture state for an option-drag stem-control operation.
+
+        Without Shift: horizontal movement controls both V and H stems
+        proportionally (isotropic). With Shift: X → H stem, Y → V stem
+        independently (anisotropic).
+        """
+        verbosePrint("TransmutorTool::_beginStemDrag")
+        g = CurrentGlyph()
+        if g is not None:
+            g.prepareUndo("Adjust Stems")
+        self._stemDragging = True
+        self._stemDragStartPoint = (point.x, point.y)
+        stemV, stemH = self._controller.stemValues
+        self._stemDragStartV = float(stemV)
+        self._stemDragStartH = float(stemH)
+
     def mouseDragged(self, point, delta) -> None:
-        """Route to scale or offset drag handler."""
+        """Route to scale, stem, or offset drag handler."""
         verbosePrint("TransmutorTool::mouseDragged")
         if self._controller is None:
             return
         if self._scalingHandle is not None:
             self._handleScaleDrag(point)
+        elif self._stemDragging:
+            self._handleStemDrag(point)
         elif self._dragging:
             self._handleOffsetDrag(point)
 
@@ -1795,6 +1830,35 @@ class TransmutorTool(BaseEventTool):
         self._controller.offset = (f"{newDx:.4f}", f"{newDy:.4f}")
         self._controller.updateSelectedBlock()
 
+    def _handleStemDrag(self, point) -> None:
+        """Adjust stem sliders based on mouse delta from drag start.
+
+        Without Shift (isotropic): horizontal distance drives V stem; H stem
+        mirrors V at the same normalised position within its own range.
+        With Shift (anisotropic): X → H stem, Y → V stem independently.
+        """
+        verbosePrint("TransmutorTool::_handleStemDrag")
+        if self._stemDragStartPoint is None:
+            return
+        minV, maxV, minH, maxH = self._controller._dsManager._activeStemRange
+        dx = point.x - self._stemDragStartPoint[0]
+        dy = point.y - self._stemDragStartPoint[1]
+        if not self.shiftDown:
+            # Isotropic: X movement drives V; H mirrors at same norm position.
+            newV = max(minV, min(maxV, self._stemDragStartV + dx))
+            t = (newV - minV) / (maxV - minV) if maxV != minV else 0.0
+            newH = minH + t * (maxH - minH)
+        else:
+            # Anisotropic: X → H, Y → V.
+            newV = max(minV, min(maxV, self._stemDragStartV + dy))
+            newH = max(minH, min(maxH, self._stemDragStartH + dx))
+        # Keep the link checkbox and H-slider-enable in sync with shift state.
+        linked = not self.shiftDown
+        self._controller.w.getItem("linkStemsCheckbox").set(1 if linked else 0)
+        self._controller.w.getItem("stemHSlider").enable(not linked)
+        self._controller.stemValues = (newV, newH)
+        self._controller.updateSelectedBlock()
+
     def _handleOffsetDrag(self, point) -> None:
         """Compute new offset from body drag and push to controller."""
         verbosePrint("TransmutorTool::_handleOffsetDrag")
@@ -1821,11 +1885,12 @@ class TransmutorTool(BaseEventTool):
         verbosePrint("TransmutorTool::mouseUp")
         wasScaling = self._scalingHandle is not None
         wasDragging = self._dragging
+        wasStemDragging = self._stemDragging
         self._clearDragState()
         if wasScaling and self._controller is not None:
             self._controller.snapToIntegers()
             self._controller.updateSelectedBlock()
-        if (wasScaling or wasDragging):
+        if wasScaling or wasDragging or wasStemDragging:
             g = CurrentGlyph()
             if g is not None:
                 g.performUndo()
@@ -1842,6 +1907,10 @@ class TransmutorTool(BaseEventTool):
         self._scalingStartScaleX = None
         self._scalingStartScaleY = None
         self._scalingStartOffset = None
+        self._stemDragging = False
+        self._stemDragStartPoint = None
+        self._stemDragStartV = None
+        self._stemDragStartH = None
 
 
 installTool(TransmutorTool())
