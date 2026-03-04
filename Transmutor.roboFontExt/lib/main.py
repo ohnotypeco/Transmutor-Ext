@@ -15,6 +15,7 @@ import colorsys
 import math
 import os
 import random
+import site
 import uuid
 
 import ezui
@@ -22,6 +23,18 @@ from AppKit import NSMenuItem
 from mojo.events import BaseEventTool, installTool
 from ufoProcessor.ufoOperator import UFOOperator
 from mojo.UI import CurrentGlyphWindow, GetFile
+
+try:
+    import mutatorScale
+except ImportError:
+    _mutatorScaleLib = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "..", "submodules", "MutatorScale", "lib"
+    )
+    site.addsitedir(_mutatorScaleLib)
+finally:
+    from mutatorScale.objects.scaler import MutatorScaleEngine
+    from mutatorScale.utilities.fontUtils import getRefStems
 
 
 # ---------------------------------------------------------------------------
@@ -230,7 +243,10 @@ def _insertTaggedContours(glyph, glyphMathObj, location: dict,
                           glyphName: str,
                           transform: tuple = (1, 0, 0, 1, 0, 0),
                           color: list = None,
-                          blockID: str = None) -> list:
+                          blockID: str = None,
+                          scalePercent: tuple = None,
+                          stemRatioV: float = 1.0,
+                          stemRatioH: float = 1.0) -> list:
     """Draw interpolated contours into glyph, apply transform, tag in objectLibs.
 
     location:           {axisName: designValue, ...}
@@ -243,7 +259,10 @@ def _insertTaggedContours(glyph, glyphMathObj, location: dict,
         blockID = str(uuid.uuid4())
 
     countBefore = len(glyph)
-    glyphMathObj.drawPoints(glyph.getPointPen())
+    if hasattr(glyphMathObj, 'drawPoints'):
+        glyphMathObj.drawPoints(glyph.getPointPen())
+    else:
+        glyphMathObj.draw(glyph.getPen())
 
     if transform != (1, 0, 0, 1, 0, 0):
         for contour in glyph.contours[countBefore:]:
@@ -259,6 +278,10 @@ def _insertTaggedContours(glyph, glyphMathObj, location: dict,
         f"{LIB_PREFIX}.normalizedLocation": dict(normalizedLocation),
         f"{LIB_PREFIX}.transform": list(transform),
     }
+    if scalePercent is not None:
+        meta[f"{LIB_PREFIX}.scalePercent"] = list(scalePercent)
+        meta[f"{LIB_PREFIX}.stemRatioV"] = stemRatioV
+        meta[f"{LIB_PREFIX}.stemRatioH"] = stemRatioH
     newIds = []
     for contour in glyph.contours[countBefore:]:
         identifier = contour.getIdentifier()
@@ -291,6 +314,8 @@ class DesignSpaceManager:
         self._dsDir = None
         self._dsSources = []
         self._defaultFont = None
+        self._scaler = None          # MutatorScaleEngine for compensated mode
+        self._scalerDefaultStems = (100, 50)  # (vstem, hstem) from default source
 
     # ---- Properties ----
 
@@ -366,7 +391,7 @@ class DesignSpaceManager:
         if path == self._dsPath:
             return True
         try:
-            self._op = UFOOperator(path, useVarlib=False)
+            self._op = UFOOperator(path, useVarlib=False, extrapolate=True)
             self._op.loadFonts()
             ds = self._op.doc
             self._wghtAxis = next((a for a in ds.axes if a.tag == "wght"), None)
@@ -376,6 +401,37 @@ class DesignSpaceManager:
             self._dsRelPath = os.path.relpath(path, SCRIPT_DIR)
             self._dsPath = path
             self._defaultFont = self._op.findDefaultFont()
+            self._scaler = None
+            self._scalerDefaultStems = (100, 50)
+            try:
+                # Build MutatorScaleEngine from wght-axis sources only
+                ds = self._op.doc
+                nonWghtDefaults = {
+                    axis.name: axis.map_forward(axis.default)
+                    for axis in ds.axes if axis.tag != "wght"
+                }
+                wghtFonts = []
+                for font, _ in self._op.getFonts():
+                    fontPath = getattr(font, "path", None)
+                    if not fontPath:
+                        continue
+                    fontPath = os.path.normpath(os.path.abspath(fontPath))
+                    source = next(
+                        (s for s in self._dsSources if s.filename and
+                         os.path.normpath(os.path.join(self._dsDir, s.filename)) == fontPath),
+                        None
+                    )
+                    if source is None:
+                        continue
+                    loc = source.location or {}
+                    if any(loc.get(ax, dv) != dv for ax, dv in nonWghtDefaults.items()):
+                        continue
+                    wghtFonts.append(font)
+                if len(wghtFonts) >= 2:
+                    self._scaler = MutatorScaleEngine(wghtFonts)
+                    self._scalerDefaultStems = getRefStems(self._defaultFont)
+            except Exception as e:
+                print(f"MutatorScale setup failed: {e}")
             return True
         except Exception as e:
             print(f"Failed to load designspace '{path}': {e}")
@@ -411,6 +467,51 @@ class DesignSpaceManager:
             print(f"Could not interpolate '{glyphName}' at {designLocation}")
             return None
         return mathGlyph, designLocation
+
+    def compensatedInterpolateGlyph(self, glyphName: str,
+                                     normalizedLocation: dict,
+                                     scaleX: float, scaleY: float,
+                                     stemRatioV: float = 1.0,
+                                     stemRatioH: float = 1.0):
+        """Return (scaledGlyph, designLocation) using MutatorScale compensation.
+
+        Builds the glyph at (scaleX, scaleY) with stem-weight compensation:
+        MutatorScaleEngine picks the source whose stems, when scaled, match the
+        reference stems of the default source multiplied by stemRatioV/stemRatioH.
+        The returned glyph is already at the target scale; the caller should
+        apply only the offset transform.
+
+        Falls back to plain interpolation if the scaler is unavailable.
+        """
+        result = self.interpolateGlyph(glyphName, normalizedLocation)
+        if result is None:
+            return None
+        _refGlyph, designLoc = result
+
+        if abs(scaleX - 1.0) < 1e-6 and abs(scaleY - 1.0) < 1e-6:
+            return result
+        if self._scaler is None:
+            return result
+
+        upm = self._defaultFont.info.unitsPerEm or 1000
+        vstem, hstem = self._scalerDefaultStems
+
+        try:
+            self._scaler.set({
+                "width": scaleX / scaleY if scaleY != 0 else 1.0,
+                "targetHeight": upm * scaleY,
+                "referenceHeight": upm,
+            })
+            scaledGlyph = self._scaler.getScaledGlyph(
+                glyphName, (vstem * stemRatioV, hstem * stemRatioH)
+            )
+        except Exception as e:
+            print(f"MutatorScale compensation failed for '{glyphName}': {e}")
+            return result
+
+        if scaledGlyph is None:
+            return result
+        return scaledGlyph, designLoc
 
     def defaultNormalizedLocation(self, fontPath: str = None) -> dict:
         """Return the ideal default slider location for the given font.
@@ -464,6 +565,7 @@ class TransmutorController(ezui.WindowController):
         self._dsManager = DesignSpaceManager()
         self._tool = None
         self._selectedBlockID = None
+        self._normLoc = {}  # normalised axis location, updated on DS load / block select
 
         content = """
         = TwoColumnForm
@@ -471,14 +573,18 @@ class TransmutorController(ezui.WindowController):
         (Choose a Designspace ...)  @designspacePopupButton
         : Glyph:
         [__]                @glyphNameField
-        : wght:
-        ---X--- [__]        @wghtSlider
-        : wdth:
-        ---X--- [__]        @wdthSlider
+        : V Stem:
+        ---X--- [__]        @stemVSlider
+        : H Stem:
+        ---X--- [__]        @stemHSlider
+        :
+        [X] Link Stems      @linkStemsCheckbox
         : Scale X:
         ---X--- [__]        @scaleXSlider
         : Scale Y:
         ---X--- [__]        @scaleYSlider
+        :
+        [X] Lock Scale      @lockScaleCheckbox
         : X Y:
         * HorizontalStack   @offsetStack
         > [__]              @xField
@@ -502,10 +608,10 @@ class TransmutorController(ezui.WindowController):
             glyphNameField=dict(value=DEFAULT_GLYPH_NAME),
             xField=dict(value="0", placeholder="X"),
             yField=dict(value="0", placeholder="Y"),
-            wghtSlider=dict(minValue=0.0, maxValue=1.0, value=0.6),
-            wdthSlider=dict(minValue=0.0, maxValue=1.0, value=0.0),
             scaleXSlider=dict(minValue=1, maxValue=200, value=100),
             scaleYSlider=dict(minValue=1, maxValue=200, value=100),
+            stemVSlider=dict(minValue=0.0, maxValue=4.0, value=1.0),
+            stemHSlider=dict(minValue=0.0, maxValue=4.0, value=1.0),
         )
 
         self.w = ezui.EZPanel(
@@ -538,6 +644,10 @@ class TransmutorController(ezui.WindowController):
             self.loadDesignSpace(self._dsManager.paths[0])
 
         self._syncAxisSliders()
+        self._syncStemControls()
+        # Apply initial lock-scale state
+        if self.w.getItem("lockScaleCheckbox").get():
+            self.w.getItem("scaleYSlider").enable(False)
 
     def started(self):
         self.w.open()
@@ -575,14 +685,16 @@ class TransmutorController(ezui.WindowController):
 
     @property
     def normalizedLocation(self) -> dict:
-        """Current normalised axis location from the sliders.
+        """Normalised axis location, set when a DS loads or a block is selected.
 
         Returns {axisTag: normalizedValue} for all active axes.
         """
-        loc = {"wght": self.w.getItem("wghtSlider").get()}
-        if self._dsManager.hasWdth:
-            loc["wdth"] = self.w.getItem("wdthSlider").get()
-        return loc
+        return dict(self._normLoc)
+
+    @normalizedLocation.setter
+    def normalizedLocation(self, loc: dict):
+        """Store the normalised axis location."""
+        self._normLoc = dict(loc)
 
     @property
     def offset(self) -> tuple:
@@ -604,6 +716,16 @@ class TransmutorController(ezui.WindowController):
         self.w.getItem("yField").set(str(xy[1]))
 
     @property
+    def lockScale(self) -> bool:
+        """Whether Scale X and Scale Y are locked together."""
+        return bool(self.w.getItem("lockScaleCheckbox").get())
+
+    @lockScale.setter
+    def lockScale(self, value: bool):
+        self.w.getItem("lockScaleCheckbox").set(1 if value else 0)
+        self.w.getItem("scaleYSlider").enable(not value)
+
+    @property
     def scalePercent(self) -> tuple:
         """Current (scaleX%, scaleY%) from the sliders."""
         return (
@@ -616,6 +738,31 @@ class TransmutorController(ezui.WindowController):
         """Set the scale sliders. Accepts int or float values."""
         self.w.getItem("scaleXSlider").set(xy[0])
         self.w.getItem("scaleYSlider").set(xy[1])
+
+    @property
+    def stemRatios(self) -> tuple:
+        """Current (stemV, stemH) multiplier ratios."""
+        return (
+            self.w.getItem("stemVSlider").get(),
+            self.w.getItem("stemHSlider").get(),
+        )
+
+    @stemRatios.setter
+    def stemRatios(self, vh: tuple):
+        """Set the stem sliders."""
+        self.w.getItem("stemVSlider").set(vh[0])
+        self.w.getItem("stemHSlider").set(vh[1])
+
+    @property
+    def linkStems(self) -> bool:
+        """Whether V and H stem sliders are linked."""
+        return bool(self.w.getItem("linkStemsCheckbox").get())
+
+    @linkStems.setter
+    def linkStems(self, value: bool):
+        self.w.getItem("linkStemsCheckbox").set(1 if value else 0)
+        if self._dsManager.isLoaded:
+            self.w.getItem("stemHSlider").enable(not value)
 
     @property
     def transform(self) -> tuple:
@@ -642,17 +789,21 @@ class TransmutorController(ezui.WindowController):
         if idx >= 0:
             self.w.getItem("designspacePopupButton").set(idx)
         self._syncAxisSliders()
+        self._syncStemControls()
 
     def _syncAxisSliders(self) -> None:
-        """Enable/disable axis sliders and set values based on current font."""
-        hasWdth = self._dsManager.hasWdth
-        self.w.getItem("wdthSlider").enable(hasWdth)
-
-        # Set slider values to current font's source position, or axis defaults
+        """Update the stored normalised location based on the current font."""
         fontPath = self._currentFontPath()
         defaults = self._dsManager.defaultNormalizedLocation(fontPath)
-        self.w.getItem("wghtSlider").set(defaults.get("wght", 0.0))
-        self.w.getItem("wdthSlider").set(defaults.get("wdth", 0.0))
+        self._normLoc = dict(defaults)
+
+    def _syncStemControls(self) -> None:
+        """Enable/disable stem sliders and link checkbox based on DS load state."""
+        active = self._dsManager.isLoaded
+        self.w.getItem("stemVSlider").enable(active)
+        linked = active and self.w.getItem("linkStemsCheckbox").get()
+        self.w.getItem("stemHSlider").enable(active and not linked)
+        self.w.getItem("linkStemsCheckbox").enable(active)
 
     def _currentFontPath(self) -> str:
         """Return the path of the current font, or None."""
@@ -693,10 +844,18 @@ class TransmutorController(ezui.WindowController):
         if g is None:
             return
         normLoc = self.normalizedLocation
-        result = self._dsManager.interpolateGlyph(self.glyphName, normLoc)
+        sx, sy = self.scalePercent
+        stemV, stemH = self.stemRatios
+        ox, oy = self.offset
+
+        result = self._dsManager.compensatedInterpolateGlyph(
+            self.glyphName, normLoc, sx / 100.0, sy / 100.0,
+            stemRatioV=stemV, stemRatioH=stemH,
+        )
         if result is None:
             return
         mathGlyph, designLoc = result
+        appliedTransform = (1, 0, 0, 1, ox, oy)
 
         # Preserve existing block color
         existingColor = None
@@ -709,8 +868,10 @@ class TransmutorController(ezui.WindowController):
         _insertTaggedContours(
             g, mathGlyph, designLoc, normLoc,
             self._dsManager.currentRelPath,
-            self.glyphName, self.transform,
+            self.glyphName, appliedTransform,
             color=existingColor, blockID=self._selectedBlockID,
+            scalePercent=(sx, sy),
+            stemRatioV=stemV, stemRatioH=stemH,
         )
         self._requestRedraw(g)
 
@@ -720,16 +881,26 @@ class TransmutorController(ezui.WindowController):
         if g is None:
             return
         normLoc = self.normalizedLocation
-        result = self._dsManager.interpolateGlyph(self.glyphName, normLoc)
+        sx, sy = self.scalePercent
+        stemV, stemH = self.stemRatios
+        ox, oy = self.offset
+
+        result = self._dsManager.compensatedInterpolateGlyph(
+            self.glyphName, normLoc, sx / 100.0, sy / 100.0,
+            stemRatioV=stemV, stemRatioH=stemH,
+        )
         if result is None:
             return
         mathGlyph, designLoc = result
+        appliedTransform = (1, 0, 0, 1, ox, oy)
 
         g.prepareUndo("Insert Block")
         newIds = _insertTaggedContours(
             g, mathGlyph, designLoc, normLoc,
             self._dsManager.currentRelPath,
-            self.glyphName, self.transform,
+            self.glyphName, appliedTransform,
+            scalePercent=(sx, sy),
+            stemRatioV=stemV, stemRatioH=stemH,
         )
         g.performUndo()
 
@@ -761,14 +932,16 @@ class TransmutorController(ezui.WindowController):
         self._selectedBlockID = None
         self.w.getItem("glyphNameField").set(DEFAULT_GLYPH_NAME)
 
-        # Set sliders to current font's source position, or axis defaults
+        # Reset normalised location to current font's source position
         fontPath = self._currentFontPath()
-        defaults = self._dsManager.defaultNormalizedLocation(fontPath)
-        self.w.getItem("wghtSlider").set(defaults.get("wght", 0.0))
-        self.w.getItem("wdthSlider").set(defaults.get("wdth", 0.0))
+        self._normLoc = dict(self._dsManager.defaultNormalizedLocation(fontPath))
 
         self.scalePercent = (100, 100)
         self.offset = (0, 0)
+        self.stemRatios = (1.0, 1.0)
+        self.w.getItem("linkStemsCheckbox").set(1)
+        self._syncStemControls()
+        self.lockScale = True
 
     def selectBlock(self, meta: dict) -> None:
         """Populate all controls from a block's stored metadata and switch DS."""
@@ -784,13 +957,32 @@ class TransmutorController(ezui.WindowController):
         glyphName = meta.get(f"{LIB_PREFIX}.glyphName", DEFAULT_GLYPH_NAME)
         self.w.getItem("glyphNameField").set(glyphName)
 
-        normalizedLoc = meta.get(f"{LIB_PREFIX}.normalizedLocation", {})
-        self.w.getItem("wghtSlider").set(normalizedLoc.get("wght", 0.6))
-        self.w.getItem("wdthSlider").set(normalizedLoc.get("wdth", 0.0))
+        self._normLoc = dict(meta.get(f"{LIB_PREFIX}.normalizedLocation", {}))
+
+        # Restore stem ratios
+        stemRatioV = meta.get(f"{LIB_PREFIX}.stemRatioV", 1.0)
+        stemRatioH = meta.get(f"{LIB_PREFIX}.stemRatioH", 1.0)
+        linked = abs(stemRatioV - stemRatioH) < 1e-6
+        self.w.getItem("stemVSlider").set(stemRatioV)
+        self.w.getItem("stemHSlider").set(stemRatioH)
+        self.w.getItem("linkStemsCheckbox").set(1 if linked else 0)
+        self._syncStemControls()
+
+        scalePercent = meta.get(f"{LIB_PREFIX}.scalePercent")
+        if scalePercent and len(scalePercent) >= 2:
+            sx, sy = scalePercent[0], scalePercent[1]
+        else:
+            transform = meta.get(f"{LIB_PREFIX}.transform", [1, 0, 0, 1, 0, 0])
+            xx, _xy, _yx, yy, _dx, _dy = transform
+            sx, sy = round(xx * 100), round(yy * 100)
+        locked = abs(sx - sy) < 0.5
+        self.w.getItem("scaleXSlider").set(sx)
+        self.w.getItem("scaleYSlider").set(sy)
+        self.w.getItem("lockScaleCheckbox").set(1 if locked else 0)
+        self.w.getItem("scaleYSlider").enable(not locked)
 
         transform = meta.get(f"{LIB_PREFIX}.transform", [1, 0, 0, 1, 0, 0])
-        xx, _xy, _yx, yy, dx, dy = transform
-        self.scalePercent = (round(xx * 100), round(yy * 100))
+        _xx, _xy, _yx, _yy, dx, dy = transform
         self.offset = (int(dx), int(dy))
 
     def snapToIntegers(self) -> None:
@@ -834,15 +1026,33 @@ class TransmutorController(ezui.WindowController):
         self.updateSelectedBlock()
 
     def scaleXSliderCallback(self, sender):
+        if self.lockScale:
+            self.w.getItem("scaleYSlider").set(sender.get())
         self.updateSelectedBlock()
 
     def scaleYSliderCallback(self, sender):
         self.updateSelectedBlock()
 
-    def wghtSliderCallback(self, sender):
+    def lockScaleCheckboxCallback(self, sender):
+        locked = bool(sender.get())
+        self.w.getItem("scaleYSlider").enable(not locked)
+        if locked:
+            self.w.getItem("scaleYSlider").set(self.w.getItem("scaleXSlider").get())
         self.updateSelectedBlock()
 
-    def wdthSliderCallback(self, sender):
+    def stemVSliderCallback(self, sender):
+        if self.linkStems:
+            self.w.getItem("stemHSlider").set(sender.get())
+        self.updateSelectedBlock()
+
+    def stemHSliderCallback(self, sender):
+        self.updateSelectedBlock()
+
+    def linkStemsCheckboxCallback(self, sender):
+        linked = bool(sender.get())
+        self.w.getItem("stemHSlider").enable(not linked)
+        if linked:
+            self.w.getItem("stemHSlider").set(self.w.getItem("stemVSlider").get())
         self.updateSelectedBlock()
 
     def insertButtonCallback(self, sender):
