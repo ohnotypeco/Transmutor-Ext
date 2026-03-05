@@ -23,6 +23,7 @@ from typing import Optional
 import ezui
 from AppKit import NSMenuItem
 from mojo.events import BaseEventTool, installTool
+from fontTools.designspaceLib.split import splitInterpolable
 from ufoProcessor.ufoOperator import UFOOperator
 from mojo.UI import CurrentGlyphWindow, GetFile, getDefault, setDefault
 
@@ -679,7 +680,6 @@ class DesignSpaceManager:
             self._activeStemRange = (100, 100, 50, 50)
             try:
                 nonWghtAxes = [a for a in ds.axes if a.tag != "wght"]
-                nonWghtAxisNames = {a.name for a in nonWghtAxes}
                 wghtAxisName = self._wghtAxis.name if self._wghtAxis else None
                 wghtAxisDefault = (
                     self._wghtAxis.map_forward(self._wghtAxis.default)
@@ -720,55 +720,109 @@ class DesignSpaceManager:
                     except Exception:
                         self._fontStems[id(font)] = (None, None)
 
-                # Group fonts by non-wght design location.
-                subspaceMap = {}
+                # Separate discrete axes (have 'values') from continuous non-wght axes.
+                # Discrete axes (e.g. ital) are split via splitInterpolable;
+                # continuous non-wght axes (e.g. wdth) are then grouped within
+                # each discrete sub-space.
+                discreteAxes = [a for a in ds.axes if hasattr(a, 'values')]
+                contNonWghtAxes = [
+                    a for a in nonWghtAxes if not hasattr(a, 'values')]
+                contNonWghtAxisNames = {a.name for a in contNonWghtAxes}
+
+                # Build a path → (font, designLoc) lookup for sub-space matching.
+                pathToFontLoc = {}
                 for font, designLoc in allFontLocs:
-                    nonWghtKey = tuple(sorted(
-                        (name, designLoc.get(name, 0.0))
-                        for name in nonWghtAxisNames
-                    ))
-                    subspaceMap.setdefault(
-                        nonWghtKey, []).append((font, designLoc))
+                    fontPath = getattr(font, 'path', None)
+                    if fontPath:
+                        pathToFontLoc[os.path.normpath(fontPath)] = (
+                            font, designLoc)
 
-                for nonWghtKey, fontLocs in subspaceMap.items():
-                    if len(fontLocs) < 2:
+                # splitInterpolable yields one sub-doc per combination of
+                # discrete axis values; yields a single (empty, full doc) when
+                # there are no discrete axes.
+                for discreteLoc, subDoc in splitInterpolable(
+                        ds, makeNames=False, expandLocations=False):
+
+                    # Match sub-doc sources to the already-loaded fonts.
+                    subFontLocs = []
+                    for src in subDoc.sources:
+                        srcPath = src.path and os.path.normpath(src.path)
+                        if srcPath and srcPath in pathToFontLoc:
+                            subFontLocs.append(pathToFontLoc[srcPath])
+                    if len(subFontLocs) < 2:
                         continue
-                    fonts = [f for f, _ in fontLocs]
 
-                    normNonWght = {}
-                    for name, designVal in nonWghtKey:
-                        axis = next(
-                            (a for a in nonWghtAxes if a.name == name), None)
-                        if axis is not None:
-                            userVal = axis.map_backward(designVal)
-                            normNonWght[axis.tag] = _userToNormalized(
-                                axis, userVal)
+                    # Build the discrete portion of normNonWght and label.
+                    normDiscrete = {}
+                    discreteLabelParts = []
+                    for axisName, userVal in discreteLoc.items():
+                        dAxis = next(
+                            (a for a in discreteAxes if a.name == axisName),
+                            None)
+                        if dAxis is not None:
+                            try:
+                                idx = dAxis.values.index(userVal)
+                                normDiscrete[dAxis.tag] = idx / max(
+                                    1, len(dAxis.values) - 1)
+                            except ValueError:
+                                normDiscrete[dAxis.tag] = 0.0
+                            valStr = (str(int(userVal)) if userVal == int(userVal)
+                                      else f"{userVal:.4g}")
+                            discreteLabelParts.append(
+                                f"{dAxis.tag} {valStr}")
 
-                    refFont, _ = min(
-                        fontLocs,
-                        key=lambda fl: abs(
-                            fl[1].get(wghtAxisName, 0) - wghtAxisDefault)
-                        if wghtAxisName else 0,
-                    )
-                    subStems = self._fontStems.get(id(refFont), (None, None))
+                    # Further group by continuous non-wght axis values (e.g. wdth).
+                    contSubspaceMap = {}
+                    for font, designLoc in subFontLocs:
+                        contKey = tuple(sorted(
+                            (name, designLoc.get(name, 0.0))
+                            for name in contNonWghtAxisNames
+                        ))
+                        contSubspaceMap.setdefault(
+                            contKey, []).append((font, designLoc))
 
-                    if nonWghtKey:
-                        parts = []
-                        for name, designVal in nonWghtKey:
+                    for contKey, fontLocs in contSubspaceMap.items():
+                        if len(fontLocs) < 2:
+                            continue
+                        fonts = [f for f, _ in fontLocs]
+
+                        # Merge discrete + continuous portions of normNonWght.
+                        normNonWght = dict(normDiscrete)
+                        for name, designVal in contKey:
                             axis = next(
-                                (a for a in nonWghtAxes if a.name == name), None)
+                                (a for a in contNonWghtAxes if a.name == name),
+                                None)
+                            if axis is not None:
+                                userVal = axis.map_backward(designVal)
+                                normNonWght[axis.tag] = _userToNormalized(
+                                    axis, userVal)
+
+                        refFont, _ = min(
+                            fontLocs,
+                            key=lambda fl: abs(
+                                fl[1].get(wghtAxisName, 0) - wghtAxisDefault)
+                            if wghtAxisName else 0,
+                        )
+                        subStems = self._fontStems.get(
+                            id(refFont), (None, None))
+
+                        # Build human-readable label.
+                        labelParts = list(discreteLabelParts)
+                        for name, designVal in contKey:
+                            axis = next(
+                                (a for a in contNonWghtAxes if a.name == name),
+                                None)
                             if axis is not None:
                                 uVal = axis.map_backward(designVal)
-                                valStr = str(int(uVal)) if uVal == int(
-                                    uVal) else f"{uVal:.4g}"
-                                parts.append(f"{axis.tag} {valStr}")
-                        label = "  ".join(parts)
-                    else:
-                        label = "Default"
-                    # Tuple format: (label, normNonWght, fonts_list, refStems)
-                    # fonts_list holds original defcon.Font objects — no pre-built scaler.
-                    self._subspaceScalers.append(
-                        (label, normNonWght, fonts, subStems))
+                                valStr = (str(int(uVal)) if uVal == int(uVal)
+                                          else f"{uVal:.4g}")
+                                labelParts.append(f"{axis.tag} {valStr}")
+                        label = "  ".join(labelParts) if labelParts else "Default"
+
+                        # Tuple format: (label, normNonWght, fonts_list, refStems)
+                        # fonts_list holds original defcon.Font objects.
+                        self._subspaceScalers.append(
+                            (label, normNonWght, fonts, subStems))
 
                 # Activate the first subspace by default.
                 if self._subspaceScalers:
@@ -1351,8 +1405,14 @@ class TransmutorController(ezui.WindowController):
         self._dsManager.registerPath(path)
         self._refreshPopup()
 
-    def loadDesignSpace(self, path: str) -> None:
-        """Load a designspace and sync the popup selection and axis sliders."""
+    def loadDesignSpace(self, path: str, updateBlock: bool = True) -> None:
+        """Load a designspace and sync the popup selection and axis sliders.
+
+        Pass updateBlock=False when the caller will set up state (normalised
+        location, stems, etc.) itself before calling updateSelectedBlock —
+        this prevents a flash where the block is briefly drawn with the wrong
+        (default) subspace before the correct state is applied.
+        """
         verbosePrint("TransmutorController::loadDesignSpace")
         path = os.path.normpath(os.path.abspath(path))
         self._dsManager.load(path)
@@ -1362,6 +1422,8 @@ class TransmutorController(ezui.WindowController):
         self._syncAxisSliders()
         self._syncStemControls()
         self._refreshSubspacePopup()
+        if updateBlock:
+            self.updateSelectedBlock()
 
     def _refreshSourceTable(self, subspaceIdx: int) -> None:
         """Populate the sources table and rebuild the active scaler.
@@ -1660,13 +1722,16 @@ class TransmutorController(ezui.WindowController):
         """Populate all controls from a block's data and switch DS."""
         verbosePrint("TransmutorController::selectBlock")
 
-        # Switch designspace to match the block
+        # Switch designspace to match the block (suppress the premature
+        # updateSelectedBlock — we fire it once at the end with correct state).
         if data.dsRelPath:
             dsAbsPath = os.path.normpath(os.path.join(SCRIPT_DIR, data.dsRelPath))
             self.addDesignSpace(dsAbsPath)
-            self.loadDesignSpace(dsAbsPath)
+            self.loadDesignSpace(dsAbsPath, updateBlock=False)
 
-        # Sync subspace popup to the stored normalised location
+        # Sync subspace popup to the stored normalised location and activate
+        # the matching subspace so the scaler is set correctly before we
+        # rebuild from enabledSources below.
         labels = self._dsManager.subspaceLabels()
         if labels:
             subspaceLocs = [
@@ -1681,6 +1746,7 @@ class TransmutorController(ezui.WindowController):
             bestIdx = min(range(len(subspaceLocs)),
                           key=lambda i: _dist(subspaceLocs[i]))
             self.w.getItem("subspacePopupButton").set(bestIdx)
+            self._applySubspace(bestIdx, updateBlock=False)
 
         # Restore enabled sources from the block data (overrides subspace
         # defaults that were set by loadDesignSpace → _refreshSourceTable).
@@ -1707,6 +1773,8 @@ class TransmutorController(ezui.WindowController):
             lockScale=abs(data.scalePercent[0] - data.scalePercent[1]) < 0.5,
             offset=data.offset,
         )
+        # Now that state, subspace, and scaler are all correct, draw once.
+        self.updateSelectedBlock()
 
     def snapToIntegers(self) -> None:
         """Round scale and offset to clean integers (called after scale drag)."""
@@ -2174,7 +2242,7 @@ class TransmutorTool(BaseEventTool):
 
         Without Shift (isotropic): horizontal distance drives V stem; H stem
         mirrors V at the same normalised position within its own range.
-        With Shift (anisotropic): X → H stem, Y → V stem independently.
+        With Shift (anisotropic): X → V stem, Y → H stem independently.
         """
         verbosePrint("TransmutorTool::_handleStemDrag")
         if self._drag.stemDragStartPoint is None:
@@ -2192,9 +2260,9 @@ class TransmutorTool(BaseEventTool):
             t = (newV - minV) / spanV if spanV != 0 else 0.0
             newH = minH + t * spanH
         else:
-            # Anisotropic: X → H, Y → V.
-            newV = max(extLoV, min(extHiV, self._drag.stemDragStartV + dy))
-            newH = max(extLoH, min(extHiH, self._drag.stemDragStartH + dx))
+            # Anisotropic: X → V, Y → H.
+            newV = max(extLoV, min(extHiV, self._drag.stemDragStartV + dx))
+            newH = max(extLoH, min(extHiH, self._drag.stemDragStartH + dy))
         # Keep the link checkbox and H-slider-enable in sync with shift state.
         linked = not self.shiftDown
         self._controller.linkStems = linked
