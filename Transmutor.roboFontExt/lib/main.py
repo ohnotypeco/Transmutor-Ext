@@ -24,7 +24,7 @@ import ezui
 from AppKit import NSMenuItem
 from mojo.events import BaseEventTool, installTool
 from ufoProcessor.ufoOperator import UFOOperator
-from mojo.UI import CurrentGlyphWindow, GetFile
+from mojo.UI import CurrentGlyphWindow, GetFile, getDefault, setDefault
 
 try:
     import mutatorScale
@@ -2238,14 +2238,96 @@ class TransmutorTool(BaseEventTool):
                 g.performUndo()
 
     def keyDown(self, event) -> None:
-        """Delete the selected block when Backspace or Delete is pressed."""
+        """Handle keyboard shortcuts for the selected block.
+
+        - Backspace / Delete: remove block.
+        - Arrow keys: nudge block offset.
+            No modifier    → 1 unit
+            Shift          → glyphViewShiftIncrement (default 10)
+            Cmd+Shift      → glyphViewCommandShiftIncrement (default 100)
+        - Option + arrow keys: adjust stem weights (no block movement).
+            Left / Right: isotropic (V drives H via norm formula) when
+            linkStems is True; V-only when linkStems is False.
+            Up / Down: H only, unchecks linkStems.
+            Shift multiplies the increment from 1 to 10.
+        """
         verbosePrint("TransmutorTool::keyDown")
         if self._controller is None:
             return
+
+        keyCode = event.keyCode()
+
         # keyCode 51 = backspace/delete, 117 = forward delete
-        if event.keyCode() in (51, 117):
+        if keyCode in (51, 117):
             if self._controller.selectedBlockID is not None:
                 self._controller.removeSelectedBlock()
+            return
+
+        # Arrow keys (123=left, 124=right, 125=down, 126=up)
+        if keyCode not in (123, 124, 125, 126):
+            return
+        if self._controller.selectedBlockID is None:
+            return
+
+        g = CurrentGlyph()
+        if g is None:
+            return
+
+        # Option: adjust stems rather than move block.
+        # Shift only controls the increment (1 vs 10) — it never changes the
+        # isotropic/anisotropic mode.  That is determined purely by which axis
+        # the arrow key moves:
+        #   Left/Right — isotropic when linkStems is True (V drives H via the
+        #                same normalised-position formula as option-drag);
+        #                V-only when linkStems is False (already anisotropic).
+        #   Up/Down    — H only (anisotropic), unchecks linkStems.
+        if self.optionDown:
+            stemIncrement = 10 if self.shiftDown else 1
+            stemV, stemH = self._controller.stemValues
+            minV, maxV, minH, maxH = self._controller._dsManager._activeStemRange
+            spanV = maxV - minV
+            spanH = maxH - minH
+            extLoV, extHiV = minV - spanV, maxV + spanV
+            extLoH, extHiH = minH - spanH, maxH + spanH
+
+            if keyCode in (123, 124):
+                # Left/Right — V moves; H mirrors if linked.
+                delta = stemIncrement if keyCode == 124 else -stemIncrement
+                newV = max(extLoV, min(extHiV, stemV + delta))
+                if self._controller.linkStems:
+                    t = (newV - minV) / spanV if spanV != 0 else 0.0
+                    newH = max(extLoH, min(extHiH, minH + t * spanH))
+                else:
+                    newH = stemH
+                self._controller.stemValues = (newV, newH)
+            else:
+                # Up/Down — H only; unlink.
+                delta = stemIncrement if keyCode == 126 else -stemIncrement
+                newH = max(extLoH, min(extHiH, stemH + delta))
+                self._controller.linkStems = False
+                self._controller.stemValues = (stemV, newH)
+
+            self._controller.updateSelectedBlock()
+            self.drawHandles(g, self._controller.selectedBlockID)
+            return
+
+        # Plain / Shift / Cmd+Shift: nudge block offset.
+        if self.commandDown and self.shiftDown:
+            increment = getDefault("glyphViewCommandShiftIncrement", defaultValue=100)
+        elif self.shiftDown:
+            increment = getDefault("glyphViewShiftIncrement", defaultValue=10)
+        else:
+            increment = 1
+
+        dx = {123: -increment, 124: increment}.get(keyCode, 0)
+        dy = {125: -increment, 126: increment}.get(keyCode, 0)
+
+        ox, oy = self._controller.offset
+        g.prepareUndo("Nudge Block")
+        self._controller.offset = (ox + dx, oy + dy)
+        self._controller.updateSelectedBlock()
+        g.performUndo()
+        self.drawHandles(g, self._controller.selectedBlockID)
 
     def didUndo(self, sender) -> None:
         """Resync Merz drawing and panel state after an undo or redo."""
