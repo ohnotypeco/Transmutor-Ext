@@ -17,6 +17,8 @@ import os
 import random
 import site
 import uuid
+from dataclasses import dataclass, field
+from typing import Optional
 
 import ezui
 from AppKit import NSMenuItem
@@ -75,6 +77,143 @@ _HANDLE_SCALING_INFO = {
     "NW": dict(handleNorm=(0.0, 1.0), anchorNorm=(1.0, 0.0), scaleH=True,  scaleV=True),
     "W":  dict(handleNorm=(0.0, 0.5), anchorNorm=(1.0, 0.5), scaleH=True,  scaleV=False),
 }
+
+
+# ---------------------------------------------------------------------------
+# State containers
+# ---------------------------------------------------------------------------
+
+@dataclass
+class DragState:
+    """Transient mouse-drag state for the TransmutorTool.
+
+    Three mutually exclusive drag modes:
+    - offset: dragging a block body to reposition it
+    - scale: dragging a handle to resize
+    - stem: option-dragging to adjust stem weights
+
+    Use setState() for partial updates.  Call reset() on mouseUp to clear.
+    """
+
+    # Offset drag
+    dragging: bool = False
+    dragStartPoint: Optional[tuple] = None       # (x, y) mouse pos at drag start
+    dragStartOffset: Optional[tuple] = None      # (ox, oy) controller offset snapshot
+
+    # Scale drag
+    scalingHandle: Optional[str] = None          # compass name e.g. "NE", or None
+    scalingAnchor: Optional[tuple] = None        # (x, y) opposite corner
+    scalingHandleXY: Optional[tuple] = None      # (x, y) handle pos at start
+    scalingStartScaleX: Optional[float] = None
+    scalingStartScaleY: Optional[float] = None
+    scalingStartScalesEqual: bool = True
+    scalingStartOffset: Optional[tuple] = None   # (ox, oy) offset snapshot
+
+    # Stem drag
+    stemDragging: bool = False
+    stemDragStartPoint: Optional[tuple] = None   # (x, y) mouse pos at drag start
+    stemDragStartV: Optional[float] = None
+    stemDragStartH: Optional[float] = None
+
+    @property
+    def activeDragType(self) -> Optional[str]:
+        """Return the active drag mode: 'scale', 'stem', 'offset', or None."""
+        verbosePrint("DragState::activeDragType")
+        if self.scalingHandle is not None:
+            return "scale"
+        if self.stemDragging:
+            return "stem"
+        if self.dragging:
+            return "offset"
+        return None
+
+    def reset(self) -> None:
+        """Clear all drag state back to defaults."""
+        verbosePrint("DragState::reset")
+        self.dragging = False
+        self.dragStartPoint = None
+        self.dragStartOffset = None
+        self.scalingHandle = None
+        self.scalingAnchor = None
+        self.scalingHandleXY = None
+        self.scalingStartScaleX = None
+        self.scalingStartScaleY = None
+        self.scalingStartScalesEqual = True
+        self.scalingStartOffset = None
+        self.stemDragging = False
+        self.stemDragStartPoint = None
+        self.stemDragStartV = None
+        self.stemDragStartH = None
+
+    def setState(self, **kwargs) -> None:
+        """Apply a partial update to drag state fields."""
+        verbosePrint("DragState::setState")
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+
+
+@dataclass
+class BlockEditState:
+    """User-facing editing state for a Transmutor block.
+
+    Single source of truth for the values shown in the EZUI panel.  Use
+    setState() for bulk updates — it applies a dict of changes and pushes
+    the full state to the UI widgets in one pass (React-style).
+
+    Individual property setters on TransmutorController perform targeted
+    widget updates for efficiency during drag interactions.
+    """
+
+    selectedBlockID: Optional[str] = None
+    glyphName: str = DEFAULT_GLYPH_NAME
+    normalizedLocation: dict = field(default_factory=dict)
+    offset: tuple = (0, 0)
+    scalePercent: tuple = (100, 100)
+    stemValues: tuple = (100, 50)
+    lockScale: bool = True
+    linkStems: bool = True
+
+    def setState(self, controller, **kwargs) -> None:
+        """Apply partial updates and push the full state to EZUI widgets.
+
+        Only fields present in kwargs are changed; then _pushToUI() renders
+        the complete state into the panel.  Offset values are coerced to
+        rounded integers.
+        """
+        verbosePrint("BlockEditState::setState")
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+        # Coerce offset to rounded ints
+        if "offset" in kwargs:
+            x, y = self.offset
+            self.offset = (int(round(float(x))), int(round(float(y))))
+        self._pushToUI(controller)
+
+    def _pushToUI(self, controller) -> None:
+        """Render the complete state into the EZUI panel widgets.
+
+        This is the "render" step — a pure function of state that sets every
+        widget value and enable/disable flag.  Called after every setState().
+        """
+        verbosePrint("BlockEditState::_pushToUI")
+        w = controller.w
+        dsLoaded = controller._dsManager.isLoaded
+
+        w.getItem("glyphNameField").set(self.glyphName)
+
+        # Scale controls (Height = scaleYSlider, Width = scaleXSlider)
+        w.getItem("scaleYSlider").set(self.scalePercent[1])
+        w.getItem("scaleXSlider").set(self.scalePercent[0])
+        w.getItem("lockScaleCheckbox").set(1 if self.lockScale else 0)
+        w.getItem("scaleXSlider").enable(not self.lockScale)
+
+        # Stem controls
+        w.getItem("stemVSlider").set(self.stemValues[0])
+        w.getItem("stemHSlider").set(self.stemValues[1])
+        w.getItem("linkStemsCheckbox").set(1 if self.linkStems else 0)
+        w.getItem("stemVSlider").enable(dsLoaded)
+        w.getItem("stemHSlider").enable(dsLoaded and not self.linkStems)
+        w.getItem("linkStemsCheckbox").enable(dsLoaded)
 
 
 # ---------------------------------------------------------------------------
@@ -765,9 +904,7 @@ class TransmutorController(ezui.WindowController):
         verbosePrint("TransmutorController::build")
         self._dsManager = DesignSpaceManager()
         self._tool = None
-        self._selectedBlockID = None
-        self._normLoc = {}  # normalised axis location, updated on DS load / block select
-        self._offset = (0, 0)  # (dx, dy) offset, draggable in the glyph view
+        self._state = BlockEditState()
 
         content = """
         = TwoColumnForm
@@ -920,21 +1057,21 @@ class TransmutorController(ezui.WindowController):
         return self._dsManager
 
     @property
-    def selectedBlockID(self) -> str:
+    def selectedBlockID(self) -> Optional[str]:
         """The ID of the currently selected block, or None."""
         verbosePrint("TransmutorController::selectedBlockID")
-        return self._selectedBlockID
+        return self._state.selectedBlockID
 
     @selectedBlockID.setter
-    def selectedBlockID(self, value: str):
+    def selectedBlockID(self, value: Optional[str]):
         verbosePrint("TransmutorController::selectedBlockID")
-        self._selectedBlockID = value
+        self._state.selectedBlockID = value
 
     @property
     def glyphName(self) -> str:
-        """Current glyph name from the text field."""
+        """Current glyph name from the state (synced by text-field callback)."""
         verbosePrint("TransmutorController::glyphName")
-        return self.w.getItem("glyphNameField").get().strip()
+        return self._state.glyphName
 
     @property
     def normalizedLocation(self) -> dict:
@@ -943,51 +1080,51 @@ class TransmutorController(ezui.WindowController):
         Returns {axisTag: normalizedValue} for all active axes.
         """
         verbosePrint("TransmutorController::normalizedLocation")
-        return dict(self._normLoc)
+        return dict(self._state.normalizedLocation)
 
     @normalizedLocation.setter
     def normalizedLocation(self, loc: dict):
         """Store the normalised axis location."""
         verbosePrint("TransmutorController::normalizedLocation")
-        self._normLoc = dict(loc)
+        self._state.normalizedLocation = dict(loc)
 
     @property
     def offset(self) -> tuple:
         """Current (x, y) offset as integers."""
         verbosePrint("TransmutorController::offset")
-        return self._offset
+        return self._state.offset
 
     @offset.setter
     def offset(self, xy: tuple):
-        """Store the offset. The block can be repositioned by dragging."""
+        """Store the offset, coerced to rounded integers."""
         verbosePrint("TransmutorController::offset")
-        self._offset = (int(round(float(xy[0]))), int(round(float(xy[1]))))
+        self._state.offset = (int(round(float(xy[0]))), int(round(float(xy[1]))))
 
     @property
     def lockScale(self) -> bool:
         """Whether Scale X and Scale Y are locked together."""
         verbosePrint("TransmutorController::lockScale")
-        return bool(self.w.getItem("lockScaleCheckbox").get())
+        return self._state.lockScale
 
     @lockScale.setter
     def lockScale(self, value: bool):
+        """Set lock-scale flag and sync checkbox + slider enable state."""
         verbosePrint("TransmutorController::lockScale")
+        self._state.lockScale = value
         self.w.getItem("lockScaleCheckbox").set(1 if value else 0)
         self.w.getItem("scaleXSlider").enable(not value)
 
     @property
     def scalePercent(self) -> tuple:
-        """Current (scaleX%, scaleY%) from the sliders."""
+        """Current (scaleX%, scaleY%) from the state."""
         verbosePrint("TransmutorController::scalePercent")
-        return (
-            self.w.getItem("scaleXSlider").get(),
-            self.w.getItem("scaleYSlider").get(),
-        )
+        return self._state.scalePercent
 
     @scalePercent.setter
     def scalePercent(self, xy: tuple):
-        """Set the scale sliders. Accepts int or float values."""
+        """Set the scale and sync slider widgets."""
         verbosePrint("TransmutorController::scalePercent")
+        self._state.scalePercent = xy
         self.w.getItem("scaleXSlider").set(xy[0])
         self.w.getItem("scaleYSlider").set(xy[1])
 
@@ -995,15 +1132,13 @@ class TransmutorController(ezui.WindowController):
     def stemValues(self) -> tuple:
         """Current (stemV, stemH) as actual stem unit values."""
         verbosePrint("TransmutorController::stemValues")
-        return (
-            self.w.getItem("stemVSlider").get(),
-            self.w.getItem("stemHSlider").get(),
-        )
+        return self._state.stemValues
 
     @stemValues.setter
     def stemValues(self, vh: tuple):
-        """Set the stem sliders to actual unit values."""
+        """Set the stem values and sync slider widgets."""
         verbosePrint("TransmutorController::stemValues")
+        self._state.stemValues = vh
         self.w.getItem("stemVSlider").set(vh[0])
         self.w.getItem("stemHSlider").set(vh[1])
 
@@ -1011,11 +1146,13 @@ class TransmutorController(ezui.WindowController):
     def linkStems(self) -> bool:
         """Whether V and H stem sliders are linked."""
         verbosePrint("TransmutorController::linkStems")
-        return bool(self.w.getItem("linkStemsCheckbox").get())
+        return self._state.linkStems
 
     @linkStems.setter
     def linkStems(self, value: bool):
+        """Set link-stems flag and sync checkbox + slider enable state."""
         verbosePrint("TransmutorController::linkStems")
+        self._state.linkStems = value
         self.w.getItem("linkStemsCheckbox").set(1 if value else 0)
         if self._dsManager.isLoaded:
             self.w.getItem("stemHSlider").enable(not value)
@@ -1077,7 +1214,7 @@ class TransmutorController(ezui.WindowController):
             def _dist(i):
                 loc = self._dsManager.subspaceNormLoc(i)
                 return sum(
-                    (loc.get(t, 0.0) - self._normLoc.get(t, 0.0)) ** 2
+                    (loc.get(t, 0.0) - self._state.normalizedLocation.get(t, 0.0)) ** 2
                     for t in loc
                 )
             bestIdx = min(range(len(labels)), key=_dist)
@@ -1097,10 +1234,10 @@ class TransmutorController(ezui.WindowController):
         """
         verbosePrint("TransmutorController::_applySubspace")
         nonWghtLoc = self._dsManager.subspaceNormLoc(index)
-        wghtVal = self._normLoc.get("wght", 0.0)
-        self._normLoc.update(nonWghtLoc)
+        wghtVal = self._state.normalizedLocation.get("wght", 0.0)
+        self._state.normalizedLocation.update(nonWghtLoc)
         # restore wght in case subspaceNormLoc included it
-        self._normLoc["wght"] = wghtVal
+        self._state.normalizedLocation["wght"] = wghtVal
         self._refreshSourceTable(index)
         if updateBlock:
             self.updateSelectedBlock()
@@ -1110,15 +1247,14 @@ class TransmutorController(ezui.WindowController):
         verbosePrint("TransmutorController::_syncAxisSliders")
         fontPath = self._currentFontPath()
         defaults = self._dsManager.defaultNormalizedLocation(fontPath)
-        self._normLoc = dict(defaults)
+        self._state.normalizedLocation = dict(defaults)
 
     def _syncStemControls(self) -> None:
         """Enable/disable stem sliders and link checkbox based on DS load state."""
         verbosePrint("TransmutorController::_syncStemControls")
         active = self._dsManager.isLoaded
         self.w.getItem("stemVSlider").enable(active)
-        linked = active and self.w.getItem("linkStemsCheckbox").get()
-        self.w.getItem("stemHSlider").enable(active and not linked)
+        self.w.getItem("stemHSlider").enable(active and not self._state.linkStems)
         self.w.getItem("linkStemsCheckbox").enable(active)
 
     def _updateStemSliderRanges(self) -> None:
@@ -1192,7 +1328,7 @@ class TransmutorController(ezui.WindowController):
     def updateSelectedBlock(self) -> None:
         """Re-interpolate and replace the currently selected block in-place."""
         verbosePrint("TransmutorController::updateSelectedBlock")
-        if self._selectedBlockID is None:
+        if self._state.selectedBlockID is None:
             return
         g = CurrentGlyph()
         if g is None:
@@ -1213,16 +1349,16 @@ class TransmutorController(ezui.WindowController):
         # Preserve existing block color
         existingColor = None
         blocks = _getBlocksFromGlyph(g)
-        blockInfo = blocks.get(self._selectedBlockID)
+        blockInfo = blocks.get(self._state.selectedBlockID)
         if blockInfo:
             existingColor = blockInfo["meta"].get(BLOCK_COLOR_KEY)
 
-        _removeBlockContours(g, self._selectedBlockID)
+        _removeBlockContours(g, self._state.selectedBlockID)
         _insertTaggedContours(
             g, mathGlyph, normLoc,
             self._dsManager.currentRelPath,
             self.glyphName, offset=(ox, oy),
-            color=existingColor, blockID=self._selectedBlockID,
+            color=existingColor, blockID=self._state.selectedBlockID,
             scalePercent=(sx, sy),
             stemV=stemV, stemH=stemH,
             linkStems=self.linkStems,
@@ -1263,22 +1399,22 @@ class TransmutorController(ezui.WindowController):
 
         if newIds:
             objLibs = g.lib.get(OBJECT_LIBS_KEY, {})
-            self._selectedBlockID = objLibs.get(
+            self._state.selectedBlockID = objLibs.get(
                 newIds[0], {}).get(BLOCK_ID_KEY)
         self._requestRedraw(g)
 
     def removeSelectedBlock(self) -> None:
         """Remove the currently selected block."""
         verbosePrint("TransmutorController::removeSelectedBlock")
-        if self._selectedBlockID is None:
+        if self._state.selectedBlockID is None:
             return
         g = CurrentGlyph()
         if g is None:
             return
         g.prepareUndo("Remove Block")
-        _removeBlockContours(g, self._selectedBlockID)
+        _removeBlockContours(g, self._state.selectedBlockID)
         _scrubOrphanedObjectLibs(g)
-        self._selectedBlockID = None
+        self._state.selectedBlockID = None
         g.performUndo()
         self._requestRedraw(g)
 
@@ -1289,27 +1425,25 @@ class TransmutorController(ezui.WindowController):
     def setDefaults(self) -> None:
         """Reset all controls to initial values and deselect."""
         verbosePrint("TransmutorController::setDefaults")
-        self._selectedBlockID = None
-        self.w.getItem("glyphNameField").set(DEFAULT_GLYPH_NAME)
-
-        # Sync _normLoc to the current font, then re-pick the best subspace so
-        # the source table and stem ranges reflect the active font/subspace.
+        # Sync normalised location to the current font, then re-pick the best
+        # subspace so the source table and stem ranges reflect the active font.
         self._syncAxisSliders()
         self._refreshSubspacePopup()
 
-        self.scalePercent = (100, 100)
-        self.offset = (0, 0)
-        # Stem values are read AFTER _refreshSubspacePopup rebuilt _activeStemRange.
         minV, _maxV, minH, _maxH = self._dsManager._activeStemRange
-        self.stemValues = (minV, minH)
-        self.w.getItem("linkStemsCheckbox").set(1)
-        self._syncStemControls()
-        self.lockScale = True
+        self._state.setState(self,
+            selectedBlockID=None,
+            glyphName=DEFAULT_GLYPH_NAME,
+            scalePercent=(100, 100),
+            offset=(0, 0),
+            stemValues=(minV, minH),
+            linkStems=True,
+            lockScale=True,
+        )
 
     def selectBlock(self, meta: dict) -> None:
         """Populate all controls from a block's stored metadata and switch DS."""
         verbosePrint("TransmutorController::selectBlock")
-        self._selectedBlockID = meta.get(BLOCK_ID_KEY)
 
         # Switch designspace to match the block
         dsRelPath = meta.get(CONTOUR_SOURCE_KEY)
@@ -1318,10 +1452,7 @@ class TransmutorController(ezui.WindowController):
             self.addDesignSpace(dsAbsPath)
             self.loadDesignSpace(dsAbsPath)
 
-        glyphName = meta.get(f"{LIB_PREFIX}.glyphName", DEFAULT_GLYPH_NAME)
-        self.w.getItem("glyphNameField").set(glyphName)
-
-        self._normLoc = dict(meta.get(f"{LIB_PREFIX}.normalizedLocation", {}))
+        normLoc = dict(meta.get(f"{LIB_PREFIX}.normalizedLocation", {}))
 
         # Sync subspace popup to the stored normalised location
         labels = self._dsManager.subspaceLabels()
@@ -1332,7 +1463,7 @@ class TransmutorController(ezui.WindowController):
 
             def _dist(loc):
                 return sum(
-                    (loc.get(t, 0.0) - self._normLoc.get(t, 0.0)) ** 2
+                    (loc.get(t, 0.0) - normLoc.get(t, 0.0)) ** 2
                     for t in loc
                 )
             bestIdx = min(range(len(subspaceLocs)),
@@ -1354,9 +1485,8 @@ class TransmutorController(ezui.WindowController):
                 self._dsManager.rebuildScalerFromFonts(fonts)
                 self._updateStemSliderRanges()
 
-        # Restore stem positions as actual unit values
+        # Parse stem values
         minV, maxV, minH, maxH = self._dsManager._activeStemRange
-        # New key: actual stem values.  Old key: normalised ratio — convert on the fly.
         if f"{LIB_PREFIX}.stemV" in meta:
             stemV = meta[f"{LIB_PREFIX}.stemV"]
             stemH = meta[f"{LIB_PREFIX}.stemH"]
@@ -1365,11 +1495,8 @@ class TransmutorController(ezui.WindowController):
             normH = meta.get(f"{LIB_PREFIX}.stemRatioH", 0.0)
             stemV = minV + normV * (maxV - minV) if maxV != minV else minV
             stemH = minH + normH * (maxH - minH) if maxH != minH else minH
-        linked = meta.get(f"{LIB_PREFIX}.linkStems", True)
-        self.stemValues = (stemV, stemH)
-        self.w.getItem("linkStemsCheckbox").set(1 if linked else 0)
-        self._syncStemControls()
 
+        # Parse scale
         scalePercent = meta.get(f"{LIB_PREFIX}.scalePercent")
         if scalePercent and len(scalePercent) >= 2:
             sx, sy = scalePercent[0], scalePercent[1]
@@ -1377,20 +1504,26 @@ class TransmutorController(ezui.WindowController):
             transform = meta.get(f"{LIB_PREFIX}.transform", [1, 0, 0, 1, 0, 0])
             xx, _xy, _yx, yy, _dx, _dy = transform
             sx, sy = round(xx * 100), round(yy * 100)
-        locked = abs(sx - sy) < 0.5
-        self.w.getItem("scaleXSlider").set(sx)
-        self.w.getItem("scaleYSlider").set(sy)
-        self.w.getItem("lockScaleCheckbox").set(1 if locked else 0)
-        self.w.getItem("scaleXSlider").enable(not locked)
 
+        # Parse offset
         storedOffset = meta.get(f"{LIB_PREFIX}.offset")
         if storedOffset and len(storedOffset) >= 2:
             dx, dy = storedOffset[0], storedOffset[1]
         else:
-            # Backward compat: read offset from legacy transform key
             t = meta.get(f"{LIB_PREFIX}.transform", [1, 0, 0, 1, 0, 0])
             dx, dy = t[4], t[5]
-        self.offset = (int(dx), int(dy))
+
+        # Single setState push writes all widgets at once
+        self._state.setState(self,
+            selectedBlockID=meta.get(BLOCK_ID_KEY),
+            glyphName=meta.get(f"{LIB_PREFIX}.glyphName", DEFAULT_GLYPH_NAME),
+            normalizedLocation=normLoc,
+            stemValues=(stemV, stemH),
+            linkStems=meta.get(f"{LIB_PREFIX}.linkStems", True),
+            scalePercent=(sx, sy),
+            lockScale=abs(sx - sy) < 0.5,
+            offset=(int(dx), int(dy)),
+        )
 
     def snapToIntegers(self) -> None:
         """Round scale and offset to clean integers (called after scale drag)."""
@@ -1409,7 +1542,7 @@ class TransmutorController(ezui.WindowController):
         verbosePrint("TransmutorController::_requestRedraw")
         if self._tool is not None:
             self._tool.drawBlocks(glyph)
-            self._tool.drawHandles(glyph, self._selectedBlockID)
+            self._tool.drawHandles(glyph, self._state.selectedBlockID)
 
     # -----------------------------------------------------------------------
     # EZUI callbacks
@@ -1442,50 +1575,68 @@ class TransmutorController(ezui.WindowController):
 
     def glyphNameFieldCallback(self, sender):
         verbosePrint("TransmutorController::glyphNameFieldCallback")
+        self._state.glyphName = sender.get().strip()
         self.updateSelectedBlock()
 
     def scaleXSliderCallback(self, sender):
         verbosePrint("TransmutorController::scaleXSliderCallback")
+        self._state.scalePercent = (sender.get(), self._state.scalePercent[1])
         self.updateSelectedBlock()
 
     def scaleYSliderCallback(self, sender):
         verbosePrint("TransmutorController::scaleYSliderCallback")
-        if self.lockScale:
-            self.w.getItem("scaleXSlider").set(sender.get())
+        sy = sender.get()
+        if self._state.lockScale:
+            sx = sy
+            self.w.getItem("scaleXSlider").set(sx)
+        else:
+            sx = self._state.scalePercent[0]
+        self._state.scalePercent = (sx, sy)
         self.updateSelectedBlock()
 
     def lockScaleCheckboxCallback(self, sender):
         verbosePrint("TransmutorController::lockScaleCheckboxCallback")
         locked = bool(sender.get())
+        self._state.lockScale = locked
         self.w.getItem("scaleXSlider").enable(not locked)
         if locked:
-            self.w.getItem("scaleXSlider").set(
-                self.w.getItem("scaleYSlider").get())
+            sy = self._state.scalePercent[1]
+            self._state.scalePercent = (sy, sy)
+            self.w.getItem("scaleXSlider").set(sy)
         self.updateSelectedBlock()
 
     def stemVSliderCallback(self, sender):
         verbosePrint("TransmutorController::stemVSliderCallback")
-        if self.linkStems:
+        v = sender.get()
+        if self._state.linkStems:
             # Mirror by normalised position so V and H track proportionally
             minV, maxV, minH, maxH = self._dsManager._activeStemRange
-            t = (sender.get() - minV) / (maxV - minV) if maxV != minV else 0.0
-            self.w.getItem("stemHSlider").set(minH + t * (maxH - minH))
+            t = (v - minV) / (maxV - minV) if maxV != minV else 0.0
+            h = minH + t * (maxH - minH)
+            self.w.getItem("stemHSlider").set(h)
+        else:
+            h = self._state.stemValues[1]
+        self._state.stemValues = (v, h)
         self.updateSelectedBlock()
 
     def stemHSliderCallback(self, sender):
         verbosePrint("TransmutorController::stemHSliderCallback")
+        self._state.stemValues = (self._state.stemValues[0], sender.get())
         self.updateSelectedBlock()
 
     def linkStemsCheckboxCallback(self, sender):
         verbosePrint("TransmutorController::linkStemsCheckboxCallback")
         linked = bool(sender.get())
+        self._state.linkStems = linked
         self.w.getItem("stemHSlider").enable(not linked)
         if linked:
             # Sync H to the same normalised position as V
             minV, maxV, minH, maxH = self._dsManager._activeStemRange
-            curV = self.w.getItem("stemVSlider").get()
-            t = (curV - minV) / (maxV - minV) if maxV != minV else 0.0
-            self.w.getItem("stemHSlider").set(minH + t * (maxH - minH))
+            v = self._state.stemValues[0]
+            t = (v - minV) / (maxV - minV) if maxV != minV else 0.0
+            h = minH + t * (maxH - minH)
+            self._state.stemValues = (v, h)
+            self.w.getItem("stemHSlider").set(h)
         self.updateSelectedBlock()
 
     def insertButtonCallback(self, sender):
@@ -1509,26 +1660,7 @@ class TransmutorTool(BaseEventTool):
     """
 
     _controller = None
-
-    # Drag state — offset movement
-    _dragging = False
-    _dragStartPoint = None
-    _dragStartOffset = None
-
-    # Drag state — handle scaling
-    _scalingHandle = None
-    _scalingAnchor = None
-    _scalingHandleXY = None
-    _scalingStartScaleX = None
-    _scalingStartScaleY = None
-    _scalingStartScalesEqual = True
-    _scalingStartOffset = None
-
-    # Drag state — option-drag stem control
-    _stemDragging = False
-    _stemDragStartPoint = None
-    _stemDragStartV = None
-    _stemDragStartH = None
+    _drag = DragState()
 
     def getToolbarTip(self) -> str:
         verbosePrint("TransmutorTool::getToolbarTip")
@@ -1739,7 +1871,7 @@ class TransmutorTool(BaseEventTool):
             return
 
         # Miss — deselect (or insert on double-click)
-        self._dragging = False
+        self._drag.dragging = False
         self._controller.setDefaults()
         self._clearHandles()
         if clickCount == 2:
@@ -1756,24 +1888,28 @@ class TransmutorTool(BaseEventTool):
 
         hu, hv = info["handleNorm"]
         au, av = info["anchorNorm"]
-        self._scalingHandle = handleName
-        self._scalingHandleXY = (_lerp(xMin, xMax, hu), _lerp(yMin, yMax, hv))
-        self._scalingAnchor = (_lerp(xMin, xMax, au), _lerp(yMin, yMax, av))
         sx, sy = self._controller.scalePercent
-        self._scalingStartScaleX = float(sx)
-        self._scalingStartScaleY = float(sy)
-        self._scalingStartScalesEqual = (self._scalingStartScaleX == self._scalingStartScaleY)
         ox, oy = self._controller.offset
-        self._scalingStartOffset = (float(ox), float(oy))
+        self._drag.setState(
+            scalingHandle=handleName,
+            scalingHandleXY=(_lerp(xMin, xMax, hu), _lerp(yMin, yMax, hv)),
+            scalingAnchor=(_lerp(xMin, xMax, au), _lerp(yMin, yMax, av)),
+            scalingStartScaleX=float(sx),
+            scalingStartScaleY=float(sy),
+            scalingStartScalesEqual=(float(sx) == float(sy)),
+            scalingStartOffset=(float(ox), float(oy)),
+        )
 
     def _beginOffsetDrag(self, point, glyph) -> None:
         """Capture state for a block-body offset drag."""
         verbosePrint("TransmutorTool::_beginOffsetDrag")
         glyph.prepareUndo("Move Block")
-        self._dragging = True
-        self._dragStartPoint = (point.x, point.y)
         ox, oy = self._controller.offset
-        self._dragStartOffset = (ox, oy)
+        self._drag.setState(
+            dragging=True,
+            dragStartPoint=(point.x, point.y),
+            dragStartOffset=(ox, oy),
+        )
 
     def _beginStemDrag(self, point) -> None:
         """Capture state for an option-drag stem-control operation.
@@ -1786,33 +1922,36 @@ class TransmutorTool(BaseEventTool):
         g = CurrentGlyph()
         if g is not None:
             g.prepareUndo("Adjust Stems")
-        self._stemDragging = True
-        self._stemDragStartPoint = (point.x, point.y)
         stemV, stemH = self._controller.stemValues
-        self._stemDragStartV = float(stemV)
-        self._stemDragStartH = float(stemH)
+        self._drag.setState(
+            stemDragging=True,
+            stemDragStartPoint=(point.x, point.y),
+            stemDragStartV=float(stemV),
+            stemDragStartH=float(stemH),
+        )
 
     def mouseDragged(self, point, delta) -> None:
         """Route to scale, stem, or offset drag handler."""
         verbosePrint("TransmutorTool::mouseDragged")
         if self._controller is None:
             return
-        if self._scalingHandle is not None:
+        dragType = self._drag.activeDragType
+        if dragType == "scale":
             self._handleScaleDrag(point)
-        elif self._stemDragging:
+        elif dragType == "stem":
             self._handleStemDrag(point)
-        elif self._dragging:
+        elif dragType == "offset":
             self._handleOffsetDrag(point)
 
     def _handleScaleDrag(self, point) -> None:
         """Compute new scale + offset from handle drag and push to controller."""
         verbosePrint("TransmutorTool::_handleScaleDrag")
-        info = _HANDLE_SCALING_INFO[self._scalingHandle]
-        ax, ay = self._scalingAnchor
-        hx, hy = self._scalingHandleXY
-        dx0, dy0 = self._scalingStartOffset
-        sx0 = self._scalingStartScaleX
-        sy0 = self._scalingStartScaleY
+        info = _HANDLE_SCALING_INFO[self._drag.scalingHandle]
+        ax, ay = self._drag.scalingAnchor
+        hx, hy = self._drag.scalingHandleXY
+        dx0, dy0 = self._drag.scalingStartOffset
+        sx0 = self._drag.scalingStartScaleX
+        sy0 = self._drag.scalingStartScaleY
 
         distH0 = hx - ax
         distV0 = hy - ay
@@ -1842,7 +1981,7 @@ class TransmutorTool(BaseEventTool):
         # with Shift held AND the scales were already equal at drag start.
         # If the block started non-square, or an edge handle is used, uncheck.
         isCorner = info["scaleH"] and info["scaleV"]
-        self._controller.lockScale = isCorner and self.shiftDown and self._scalingStartScalesEqual
+        self._controller.lockScale = isCorner and self.shiftDown and self._drag.scalingStartScalesEqual
         # Store precise floats so rounding doesn't accumulate across frames
         self._controller.offset = (f"{newDx:.4f}", f"{newDy:.4f}")
         self._controller.updateSelectedBlock()
@@ -1855,39 +1994,38 @@ class TransmutorTool(BaseEventTool):
         With Shift (anisotropic): X → H stem, Y → V stem independently.
         """
         verbosePrint("TransmutorTool::_handleStemDrag")
-        if self._stemDragStartPoint is None:
+        if self._drag.stemDragStartPoint is None:
             return
         minV, maxV, minH, maxH = self._controller._dsManager._activeStemRange
         spanV = maxV - minV
         spanH = maxH - minH
         extLoV, extHiV = minV - spanV, maxV + spanV
         extLoH, extHiH = minH - spanH, maxH + spanH
-        dx = point.x - self._stemDragStartPoint[0]
-        dy = point.y - self._stemDragStartPoint[1]
+        dx = point.x - self._drag.stemDragStartPoint[0]
+        dy = point.y - self._drag.stemDragStartPoint[1]
         if not self.shiftDown:
             # Isotropic: X movement drives V; H mirrors at same norm position.
-            newV = max(extLoV, min(extHiV, self._stemDragStartV + dx))
+            newV = max(extLoV, min(extHiV, self._drag.stemDragStartV + dx))
             t = (newV - minV) / spanV if spanV != 0 else 0.0
             newH = minH + t * spanH
         else:
             # Anisotropic: X → H, Y → V.
-            newV = max(extLoV, min(extHiV, self._stemDragStartV + dy))
-            newH = max(extLoH, min(extHiH, self._stemDragStartH + dx))
+            newV = max(extLoV, min(extHiV, self._drag.stemDragStartV + dy))
+            newH = max(extLoH, min(extHiH, self._drag.stemDragStartH + dx))
         # Keep the link checkbox and H-slider-enable in sync with shift state.
         linked = not self.shiftDown
-        self._controller.w.getItem("linkStemsCheckbox").set(1 if linked else 0)
-        self._controller.w.getItem("stemHSlider").enable(not linked)
+        self._controller.linkStems = linked
         self._controller.stemValues = (newV, newH)
         self._controller.updateSelectedBlock()
 
     def _handleOffsetDrag(self, point) -> None:
         """Compute new offset from body drag and push to controller."""
         verbosePrint("TransmutorTool::_handleOffsetDrag")
-        if self._dragStartPoint is None or self._dragStartOffset is None:
+        if self._drag.dragStartPoint is None or self._drag.dragStartOffset is None:
             return
 
-        rawDx = point.x - self._dragStartPoint[0]
-        rawDy = point.y - self._dragStartPoint[1]
+        rawDx = point.x - self._drag.dragStartPoint[0]
+        rawDy = point.y - self._drag.dragStartPoint[1]
 
         if self.shiftDown and (rawDx != 0 or rawDy != 0):
             magnitude = math.hypot(rawDx, rawDy)
@@ -1896,17 +2034,17 @@ class TransmutorTool(BaseEventTool):
             rawDx = magnitude * math.cos(snappedAngle)
             rawDy = magnitude * math.sin(snappedAngle)
 
-        newX = int(round(self._dragStartOffset[0] + rawDx))
-        newY = int(round(self._dragStartOffset[1] + rawDy))
+        newX = int(round(self._drag.dragStartOffset[0] + rawDx))
+        newY = int(round(self._drag.dragStartOffset[1] + rawDy))
         self._controller.offset = (newX, newY)
         self._controller.updateSelectedBlock()
 
     def mouseUp(self, point) -> None:
         """End any active drag, snapping float values to integers."""
         verbosePrint("TransmutorTool::mouseUp")
-        wasScaling = self._scalingHandle is not None
-        wasDragging = self._dragging
-        wasStemDragging = self._stemDragging
+        wasScaling = self._drag.scalingHandle is not None
+        wasDragging = self._drag.dragging
+        wasStemDragging = self._drag.stemDragging
         self._clearDragState()
         if wasScaling and self._controller is not None:
             self._controller.snapToIntegers()
@@ -1929,20 +2067,7 @@ class TransmutorTool(BaseEventTool):
     def _clearDragState(self) -> None:
         """Reset all transient drag state."""
         verbosePrint("TransmutorTool::_clearDragState")
-        self._dragging = False
-        self._dragStartPoint = None
-        self._dragStartOffset = None
-        self._scalingHandle = None
-        self._scalingAnchor = None
-        self._scalingHandleXY = None
-        self._scalingStartScaleX = None
-        self._scalingStartScaleY = None
-        self._scalingStartScalesEqual = True
-        self._scalingStartOffset = None
-        self._stemDragging = False
-        self._stemDragStartPoint = None
-        self._stemDragStartV = None
-        self._stemDragStartH = None
+        self._drag.reset()
 
 
 installTool(TransmutorTool())
