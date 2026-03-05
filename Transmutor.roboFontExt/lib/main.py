@@ -216,6 +216,100 @@ class BlockEditState:
         w.getItem("linkStemsCheckbox").enable(dsLoaded)
 
 
+@dataclass
+class BlockData:
+    """Persisted parameters for a single interpolated block.
+
+    Serialized to / from public.objectLibs as a flat dict of
+    co.ohnotype.transmutor.* keys.  Instances are always transient in-memory
+    objects — they are never stored directly in font files.
+
+    Use fromRawDict() to deserialize and toRawDict() to serialize.
+    """
+
+    blockID: str                        # UUID string; generate with uuid.uuid4()
+    dsRelPath: str                      # SCRIPT_DIR-relative .designspace path
+    glyphName: str
+    normalizedLocation: dict            # {axisTag: normalizedValue}
+    offset: tuple                       # (dx, dy) integer pixel offset
+    scalePercent: tuple                 # (sx%, sy%) e.g. (100, 150)
+    stemV: float
+    stemH: float
+    linkStems: bool
+    enabledSources: list                # DS-relative source filenames
+    color: Optional[list] = None        # [R, G, B]; None → auto-generated on insert
+
+    @classmethod
+    def fromRawDict(cls, raw: dict,
+                    stemRange: tuple = (100, 100, 50, 50)) -> "BlockData":
+        """Deserialize from a public.objectLibs entry.
+
+        Handles both current keys and legacy stemRatioV/stemRatioH and
+        transform-based scale/offset written by older versions.
+        stemRange is only needed for the legacy stemRatio conversion.
+        """
+        verbosePrint("BlockData::fromRawDict")
+        minV, maxV, minH, maxH = stemRange
+
+        # Stem values
+        if f"{LIB_PREFIX}.stemV" in raw:
+            stemV = raw[f"{LIB_PREFIX}.stemV"]
+            stemH = raw[f"{LIB_PREFIX}.stemH"]
+        else:
+            normV = raw.get(f"{LIB_PREFIX}.stemRatioV", 0.0)
+            normH = raw.get(f"{LIB_PREFIX}.stemRatioH", 0.0)
+            stemV = minV + normV * (maxV - minV) if maxV != minV else minV
+            stemH = minH + normH * (maxH - minH) if maxH != minH else minH
+
+        # Scale
+        scaleData = raw.get(f"{LIB_PREFIX}.scalePercent")
+        if scaleData and len(scaleData) >= 2:
+            sx, sy = scaleData[0], scaleData[1]
+        else:
+            transform = raw.get(f"{LIB_PREFIX}.transform", [1, 0, 0, 1, 0, 0])
+            xx, _xy, _yx, yy, _dx, _dy = transform
+            sx, sy = round(xx * 100), round(yy * 100)
+
+        # Offset
+        offsetData = raw.get(f"{LIB_PREFIX}.offset")
+        if offsetData and len(offsetData) >= 2:
+            dx, dy = int(offsetData[0]), int(offsetData[1])
+        else:
+            t = raw.get(f"{LIB_PREFIX}.transform", [1, 0, 0, 1, 0, 0])
+            dx, dy = int(t[4]), int(t[5])
+
+        return cls(
+            blockID=raw.get(BLOCK_ID_KEY, ""),
+            dsRelPath=raw.get(CONTOUR_SOURCE_KEY, ""),
+            glyphName=raw.get(f"{LIB_PREFIX}.glyphName", DEFAULT_GLYPH_NAME),
+            color=raw.get(BLOCK_COLOR_KEY),
+            normalizedLocation=dict(raw.get(f"{LIB_PREFIX}.normalizedLocation", {})),
+            offset=(dx, dy),
+            scalePercent=(sx, sy),
+            stemV=stemV,
+            stemH=stemH,
+            linkStems=raw.get(f"{LIB_PREFIX}.linkStems", True),
+            enabledSources=list(raw.get(f"{LIB_PREFIX}.enabledSources", [])),
+        )
+
+    def toRawDict(self) -> dict:
+        """Serialize to a flat dict suitable for public.objectLibs."""
+        verbosePrint("BlockData::toRawDict")
+        return {
+            CONTOUR_SOURCE_KEY: self.dsRelPath,
+            BLOCK_ID_KEY: self.blockID,
+            BLOCK_COLOR_KEY: self.color,
+            f"{LIB_PREFIX}.glyphName": self.glyphName,
+            f"{LIB_PREFIX}.normalizedLocation": dict(self.normalizedLocation),
+            f"{LIB_PREFIX}.offset": list(self.offset),
+            f"{LIB_PREFIX}.scalePercent": list(self.scalePercent),
+            f"{LIB_PREFIX}.stemV": self.stemV,
+            f"{LIB_PREFIX}.stemH": self.stemH,
+            f"{LIB_PREFIX}.linkStems": self.linkStems,
+            f"{LIB_PREFIX}.enabledSources": list(self.enabledSources),
+        }
+
+
 # ---------------------------------------------------------------------------
 # Pure utility functions
 # ---------------------------------------------------------------------------
@@ -331,19 +425,19 @@ def _userToNormalized(axis, userValue: float) -> float:
 # ---------------------------------------------------------------------------
 
 def _getBlocksFromGlyph(glyph) -> dict:
-    """Return {blockID: {"contours": [...], "meta": {...}}} for tagged contours."""
+    """Return {blockID: {"contours": [...], "data": BlockData}} for tagged contours."""
     verbosePrint("_getBlocksFromGlyph")
     objectLibs = glyph.lib.get(OBJECT_LIBS_KEY, {})
     blocks = {}
     for contour in glyph.contours:
         if not contour.identifier:
             continue
-        meta = objectLibs.get(contour.identifier, {})
-        if BLOCK_ID_KEY not in meta:
+        raw = objectLibs.get(contour.identifier, {})
+        if BLOCK_ID_KEY not in raw:
             continue
-        blockID = meta[BLOCK_ID_KEY]
+        blockID = raw[BLOCK_ID_KEY]
         if blockID not in blocks:
-            blocks[blockID] = {"contours": [], "meta": meta}
+            blocks[blockID] = {"contours": [], "data": BlockData.fromRawDict(raw)}
         blocks[blockID]["contours"].append(contour)
     return blocks
 
@@ -383,27 +477,43 @@ def _scrubOrphanedObjectLibs(glyph) -> int:
     return len(stale)
 
 
-def _insertTaggedContours(glyph, glyphMathObj,
-                          normalizedLocation: dict, dsRelPath: str,
-                          glyphName: str,
-                          offset: tuple = (0, 0),
-                          color: list = None,
-                          blockID: str = None,
-                          scalePercent: tuple = None,
-                          stemV: float = 100.0,
-                          stemH: float = 50.0,
-                          linkStems: bool = True,
-                          enabledSources: list = None) -> list:
-    """Draw interpolated contours into glyph, apply offset, tag in objectLibs.
+def _forceContourIdentifier(glyph, contour, newId: str) -> None:
+    """Transplant newId onto contour, keeping the glyph's identifier registry in sync.
 
-    normalizedLocation: {axisTag: normalizedValue, ...}
-    Returns list of new contour identifiers.
+    fontParts exposes `identifier` as read-only once set, so we write directly
+    to the underlying DoodleContour._identifier slot and update the glyph
+    registry set (glyph.naked()._identifiers) atomically.
+    """
+    verbosePrint("_forceContourIdentifier")
+    naked = contour.naked()
+    glyphNaked = glyph.naked()
+    identifiers = glyphNaked._identifiers
+    # Remove the auto-generated identifier that was assigned on draw
+    oldId = naked._identifier
+    if oldId and oldId in identifiers:
+        identifiers.discard(oldId)
+    # Stamp in the preserved identifier
+    naked._identifier = newId
+    identifiers.add(newId)
+
+
+def _insertTaggedContours(glyph, glyphMathObj, data: "BlockData",
+                          preserveIdentifiers: list = None) -> list:
+    """Draw interpolated contours into glyph, apply offset, and tag in objectLibs.
+
+    If data.color is None a new color is auto-generated from existing block hues.
+
+    preserveIdentifiers: optional list of contour identifiers (one per contour
+    produced by glyphMathObj in draw order).  When provided, the newly-inserted
+    contours are given those identifiers instead of auto-generated ones, so that
+    public.objectLibs keys remain stable across re-interpolations and RoboFont
+    undo works correctly.
+
+    Returns list of contour identifiers (old or new).
     """
     verbosePrint("_insertTaggedContours")
-    if color is None:
-        color = _generateBlockColor(glyph)
-    if blockID is None:
-        blockID = str(uuid.uuid4())
+    if data.color is None:
+        data.color = _generateBlockColor(glyph)
 
     countBefore = len(glyph)
     if hasattr(glyphMathObj, 'drawPoints'):
@@ -411,32 +521,28 @@ def _insertTaggedContours(glyph, glyphMathObj,
     else:
         glyphMathObj.draw(glyph.getPen())
 
-    dx, dy = offset
+    dx, dy = data.offset
     if dx or dy:
         t = (1, 0, 0, 1, dx, dy)
         for contour in glyph.contours[countBefore:]:
             contour.transformBy(t)
 
+    # Transplant stable identifiers so objectLibs keys don't change between edits.
+    newContours = glyph.contours[countBefore:]
+    if preserveIdentifiers and len(preserveIdentifiers) == len(newContours):
+        for contour, savedId in zip(newContours, preserveIdentifiers):
+            _forceContourIdentifier(glyph, contour, savedId)
+    else:
+        # Ensure each contour has an identifier (getIdentifier assigns one if missing)
+        for contour in newContours:
+            contour.getIdentifier()
+
     objectLibs = dict(glyph.lib.get(OBJECT_LIBS_KEY, {}))
-    meta = {
-        CONTOUR_SOURCE_KEY: dsRelPath,
-        BLOCK_ID_KEY: blockID,
-        BLOCK_COLOR_KEY: color,
-        f"{LIB_PREFIX}.glyphName": glyphName,
-        f"{LIB_PREFIX}.normalizedLocation": dict(normalizedLocation),
-        f"{LIB_PREFIX}.offset": list(offset),
-    }
-    if scalePercent is not None:
-        meta[f"{LIB_PREFIX}.scalePercent"] = list(scalePercent)
-        meta[f"{LIB_PREFIX}.stemV"] = stemV
-        meta[f"{LIB_PREFIX}.stemH"] = stemH
-        meta[f"{LIB_PREFIX}.linkStems"] = linkStems
-    if enabledSources is not None:
-        meta[f"{LIB_PREFIX}.enabledSources"] = list(enabledSources)
+    rawDict = data.toRawDict()
     newIds = []
-    for contour in glyph.contours[countBefore:]:
-        identifier = contour.getIdentifier()
-        objectLibs[identifier] = meta
+    for contour in newContours:
+        identifier = contour.identifier
+        objectLibs[identifier] = rawDict
         newIds.append(identifier)
     glyph.lib[OBJECT_LIBS_KEY] = objectLibs
     return newIds
@@ -803,20 +909,25 @@ class DesignSpaceManager:
             self._activeScaler = None
 
     def compensatedInterpolateGlyph(self, glyphName: str,
-                                    normalizedLocation: dict,
                                     scaleX: float, scaleY: float,
                                     targetStemV: float = 100.0,
                                     targetStemH: float = 50.0):
-        """Return a scaled glyph using MutatorScale stem compensation, or None.
+        """Return a normalised scaled glyph via MutatorScale stem compensation.
 
         targetStemV / targetStemH are actual stem unit values to target.
 
         The active MutatorScaleEngine (set by subspace / source-table checkboxes)
         interpolates between its sources to match the target stem thickness at
-        the requested scale.  The returned glyph is already at the target scale;
-        the caller should apply only the offset transform.
+        the requested scale.
 
-        Returns None when the scaler is unavailable or the glyph cannot be found.
+        The returned glyph is shifted so its SW bounding-box corner sits at
+        (0, 0).  The original SW position is returned as *baseOffset* so the
+        caller can place the glyph at an absolute position in the host glyph.
+
+        Returns (scaledGlyph, baseOffset) or None when the scaler is
+        unavailable or the glyph cannot be found.  *baseOffset* is an
+        (x, y) tuple representing the glyph's natural SW position before
+        normalisation.
         """
         verbosePrint("DesignSpaceManager::compensatedInterpolateGlyph")
         if not self.isLoaded:
@@ -849,7 +960,20 @@ class DesignSpaceManager:
         if scaledGlyph is None:
             print(f"MutatorScale returned no glyph for '{glyphName}'.")
             return None
-        return scaledGlyph
+
+        # Normalise so SW corner sits at (0, 0).  This decouples the glyph's
+        # coordinate-space position from MutatorScale's internal placement,
+        # which shifts non-linearly with scale due to stem compensation.
+        # The caller stores baseOffset as the block's absolute position.
+        bounds = scaledGlyph.bounds
+        if bounds is not None:
+            xMin, yMin = bounds[0], bounds[1]
+            baseOffset = (xMin, yMin)
+            if xMin != 0 or yMin != 0:
+                scaledGlyph.moveBy((-xMin, -yMin))
+        else:
+            baseOffset = (0, 0)
+        return scaledGlyph, baseOffset
 
     def defaultNormalizedLocation(self, fontPath: str = None) -> dict:
         """Return the ideal default normalised location for the given font.
@@ -1339,31 +1463,37 @@ class TransmutorController(ezui.WindowController):
         ox, oy = self.offset
 
         result = self._dsManager.compensatedInterpolateGlyph(
-            self.glyphName, normLoc, sx / 100.0, sy / 100.0,
+            self.glyphName, sx / 100.0, sy / 100.0,
             targetStemV=stemV, targetStemH=stemH,
         )
         if result is None:
             return
-        mathGlyph = result
+        mathGlyph, _baseOffset = result
 
-        # Preserve existing block color
+        # Preserve existing block color and contour identifiers so that
+        # objectLibs keys remain stable and RoboFont undo works correctly.
         existingColor = None
+        existingIdentifiers = None
         blocks = _getBlocksFromGlyph(g)
         blockInfo = blocks.get(self._state.selectedBlockID)
         if blockInfo:
-            existingColor = blockInfo["meta"].get(BLOCK_COLOR_KEY)
+            existingColor = blockInfo["data"].color
+            existingIdentifiers = [c.identifier for c in blockInfo["contours"]]
 
         _removeBlockContours(g, self._state.selectedBlockID)
-        _insertTaggedContours(
-            g, mathGlyph, normLoc,
-            self._dsManager.currentRelPath,
-            self.glyphName, offset=(ox, oy),
-            color=existingColor, blockID=self._state.selectedBlockID,
+        _insertTaggedContours(g, mathGlyph, BlockData(
+            blockID=self._state.selectedBlockID,
+            dsRelPath=self._dsManager.currentRelPath,
+            glyphName=self.glyphName,
+            normalizedLocation=normLoc,
+            offset=(ox, oy),
             scalePercent=(sx, sy),
-            stemV=stemV, stemH=stemH,
+            stemV=stemV,
+            stemH=stemH,
             linkStems=self.linkStems,
             enabledSources=self._enabledSourceFiles(),
-        )
+            color=existingColor,
+        ), preserveIdentifiers=existingIdentifiers)
         self._requestRedraw(g)
 
     def insertNewBlock(self) -> None:
@@ -1378,29 +1508,42 @@ class TransmutorController(ezui.WindowController):
         ox, oy = self.offset
 
         result = self._dsManager.compensatedInterpolateGlyph(
-            self.glyphName, normLoc, sx / 100.0, sy / 100.0,
+            self.glyphName, sx / 100.0, sy / 100.0,
             targetStemV=stemV, targetStemH=stemH,
         )
         if result is None:
             return
-        mathGlyph = result
+        mathGlyph, baseOffset = result
+
+        # Bake the MutatorScale natural position into the stored offset so
+        # the block appears at its natural location.  The user's panel offset
+        # (ox, oy) is added on top (typically 0, 0 for a brand-new block).
+        absoluteOffset = (int(round(baseOffset[0] + ox)),
+                          int(round(baseOffset[1] + oy)))
 
         g.prepareUndo("Insert Block")
-        newIds = _insertTaggedContours(
-            g, mathGlyph, normLoc,
-            self._dsManager.currentRelPath,
-            self.glyphName, offset=(ox, oy),
+        blockData = BlockData(
+            blockID=str(uuid.uuid4()),
+            dsRelPath=self._dsManager.currentRelPath,
+            glyphName=self.glyphName,
+            normalizedLocation=normLoc,
+            offset=absoluteOffset,
             scalePercent=(sx, sy),
-            stemV=stemV, stemH=stemH,
+            stemV=stemV,
+            stemH=stemH,
             linkStems=self.linkStems,
             enabledSources=self._enabledSourceFiles(),
+            color=None,  # auto-generated from glyph on insert
         )
+        newIds = _insertTaggedContours(g, mathGlyph, blockData)
         g.performUndo()
 
         if newIds:
-            objLibs = g.lib.get(OBJECT_LIBS_KEY, {})
-            self._state.selectedBlockID = objLibs.get(
-                newIds[0], {}).get(BLOCK_ID_KEY)
+            self._state.selectedBlockID = blockData.blockID
+            # Push absolute offset to UI so sliders reflect the block's
+            # actual position, keeping the SW corner pinned on future
+            # scale changes.
+            self._state.offset = absoluteOffset
         self._requestRedraw(g)
 
     def removeSelectedBlock(self) -> None:
@@ -1441,18 +1584,15 @@ class TransmutorController(ezui.WindowController):
             lockScale=True,
         )
 
-    def selectBlock(self, meta: dict) -> None:
-        """Populate all controls from a block's stored metadata and switch DS."""
+    def selectBlock(self, data: "BlockData") -> None:
+        """Populate all controls from a block's data and switch DS."""
         verbosePrint("TransmutorController::selectBlock")
 
         # Switch designspace to match the block
-        dsRelPath = meta.get(CONTOUR_SOURCE_KEY)
-        if dsRelPath:
-            dsAbsPath = os.path.normpath(os.path.join(SCRIPT_DIR, dsRelPath))
+        if data.dsRelPath:
+            dsAbsPath = os.path.normpath(os.path.join(SCRIPT_DIR, data.dsRelPath))
             self.addDesignSpace(dsAbsPath)
             self.loadDesignSpace(dsAbsPath)
-
-        normLoc = dict(meta.get(f"{LIB_PREFIX}.normalizedLocation", {}))
 
         # Sync subspace popup to the stored normalised location
         labels = self._dsManager.subspaceLabels()
@@ -1463,18 +1603,17 @@ class TransmutorController(ezui.WindowController):
 
             def _dist(loc):
                 return sum(
-                    (loc.get(t, 0.0) - normLoc.get(t, 0.0)) ** 2
+                    (loc.get(t, 0.0) - data.normalizedLocation.get(t, 0.0)) ** 2
                     for t in loc
                 )
             bestIdx = min(range(len(subspaceLocs)),
                           key=lambda i: _dist(subspaceLocs[i]))
             self.w.getItem("subspacePopupButton").set(bestIdx)
 
-        # Restore enabled sources from the block metadata (overrides subspace
+        # Restore enabled sources from the block data (overrides subspace
         # defaults that were set by loadDesignSpace → _refreshSourceTable).
-        storedSources = meta.get(f"{LIB_PREFIX}.enabledSources", [])
-        if storedSources:
-            fontIdSet = self._dsManager.sourceFilesFontIdSet(storedSources)
+        if data.enabledSources:
+            fontIdSet = self._dsManager.sourceFilesFontIdSet(data.enabledSources)
             if fontIdSet:
                 rows = self._dsManager.allSourceRows(fontIdSet)
                 self.w.getItem("sourceFontTable").set(rows)
@@ -1485,44 +1624,16 @@ class TransmutorController(ezui.WindowController):
                 self._dsManager.rebuildScalerFromFonts(fonts)
                 self._updateStemSliderRanges()
 
-        # Parse stem values
-        minV, maxV, minH, maxH = self._dsManager._activeStemRange
-        if f"{LIB_PREFIX}.stemV" in meta:
-            stemV = meta[f"{LIB_PREFIX}.stemV"]
-            stemH = meta[f"{LIB_PREFIX}.stemH"]
-        else:
-            normV = meta.get(f"{LIB_PREFIX}.stemRatioV", 0.0)
-            normH = meta.get(f"{LIB_PREFIX}.stemRatioH", 0.0)
-            stemV = minV + normV * (maxV - minV) if maxV != minV else minV
-            stemH = minH + normH * (maxH - minH) if maxH != minH else minH
-
-        # Parse scale
-        scalePercent = meta.get(f"{LIB_PREFIX}.scalePercent")
-        if scalePercent and len(scalePercent) >= 2:
-            sx, sy = scalePercent[0], scalePercent[1]
-        else:
-            transform = meta.get(f"{LIB_PREFIX}.transform", [1, 0, 0, 1, 0, 0])
-            xx, _xy, _yx, yy, _dx, _dy = transform
-            sx, sy = round(xx * 100), round(yy * 100)
-
-        # Parse offset
-        storedOffset = meta.get(f"{LIB_PREFIX}.offset")
-        if storedOffset and len(storedOffset) >= 2:
-            dx, dy = storedOffset[0], storedOffset[1]
-        else:
-            t = meta.get(f"{LIB_PREFIX}.transform", [1, 0, 0, 1, 0, 0])
-            dx, dy = t[4], t[5]
-
         # Single setState push writes all widgets at once
         self._state.setState(self,
-            selectedBlockID=meta.get(BLOCK_ID_KEY),
-            glyphName=meta.get(f"{LIB_PREFIX}.glyphName", DEFAULT_GLYPH_NAME),
-            normalizedLocation=normLoc,
-            stemValues=(stemV, stemH),
-            linkStems=meta.get(f"{LIB_PREFIX}.linkStems", True),
-            scalePercent=(sx, sy),
-            lockScale=abs(sx - sy) < 0.5,
-            offset=(int(dx), int(dy)),
+            selectedBlockID=data.blockID,
+            glyphName=data.glyphName,
+            normalizedLocation=data.normalizedLocation,
+            stemValues=(data.stemV, data.stemH),
+            linkStems=data.linkStems,
+            scalePercent=data.scalePercent,
+            lockScale=abs(data.scalePercent[0] - data.scalePercent[1]) < 0.5,
+            offset=data.offset,
         )
 
     def snapToIntegers(self) -> None:
@@ -1716,7 +1827,7 @@ class TransmutorTool(BaseEventTool):
         if self._controller is None:
             return
         for info in _getBlocksFromGlyph(glyph).values():
-            dsRelPath = info["meta"].get(CONTOUR_SOURCE_KEY)
+            dsRelPath = info["data"].dsRelPath
             if dsRelPath:
                 dsAbsPath = os.path.normpath(
                     os.path.join(SCRIPT_DIR, dsRelPath))
@@ -1733,7 +1844,7 @@ class TransmutorTool(BaseEventTool):
             _MERZ_BG_ID, location="background", clear=True
         )
         for _blockID, info in _getBlocksFromGlyph(glyph).items():
-            color = info["meta"].get(BLOCK_COLOR_KEY)
+            color = info["data"].color
             if not color:
                 continue
             strokeColor = (color[0], color[1], color[2], OUTLINE_ALPHA)
@@ -1762,7 +1873,7 @@ class TransmutorTool(BaseEventTool):
         bounds = _unionBounds(info["contours"])
         if bounds is None:
             return
-        color = info["meta"].get(BLOCK_COLOR_KEY)
+        color = info["data"].color
         if not color:
             return
 
@@ -1829,12 +1940,12 @@ class TransmutorTool(BaseEventTool):
         return None
 
     def _hitTestBlocks(self, point, glyph):
-        """Return (blockID, meta) for the first block hit, or None."""
+        """Return (blockID, BlockData) for the first block hit, or None."""
         verbosePrint("TransmutorTool::_hitTestBlocks")
         for blockID, info in _getBlocksFromGlyph(glyph).items():
             bounds = _unionBounds(info["contours"])
             if _pointInBounds(point, bounds):
-                return blockID, info["meta"]
+                return blockID, info["data"]
         return None
 
     # -----------------------------------------------------------------------
@@ -1861,8 +1972,8 @@ class TransmutorTool(BaseEventTool):
         # Priority 2: block body hit
         hit = self._hitTestBlocks(point, g)
         if hit is not None:
-            blockID, meta = hit
-            self._controller.selectBlock(meta)
+            blockID, data = hit
+            self._controller.selectBlock(data)
             self.drawHandles(g, blockID)
             if self.optionDown:
                 self._beginStemDrag(point)
@@ -2063,6 +2174,41 @@ class TransmutorTool(BaseEventTool):
         if event.keyCode() in (51, 117):
             if self._controller.selectedBlockID is not None:
                 self._controller.removeSelectedBlock()
+
+    def didUndo(self, sender) -> None:
+        """Resync Merz drawing and panel state after an undo or redo."""
+        verbosePrint("TransmutorTool::didUndo")
+        self._syncAfterHistoryChange()
+
+    def _syncAfterHistoryChange(self) -> None:
+        """Redraw blocks and resync the full controller state after undo/redo.
+
+        Reads BlockData back from the glyph (which now reflects the undone/
+        redone state) and pushes it through selectBlock() so all panel
+        widgets, sliders, offsets and stems reflect what's actually in the
+        glyph.  If the selected block no longer exists, deselects cleanly.
+        """
+        verbosePrint("TransmutorTool::_syncAfterHistoryChange")
+        g = CurrentGlyph()
+        if g is None:
+            return
+        self.drawBlocks(g)
+        if self._controller is None:
+            return
+        selectedID = self._controller.selectedBlockID
+        if selectedID is None:
+            return
+        blocks = _getBlocksFromGlyph(g)
+        if selectedID in blocks:
+            # Re-read the authoritative BlockData from the glyph and push
+            # it to the controller so every panel widget reflects the
+            # undone/redone state.
+            self._controller.selectBlock(blocks[selectedID]["data"])
+            self.drawHandles(g, selectedID)
+        else:
+            # Block was removed by undo — deselect cleanly
+            self._controller.setDefaults()
+            self._clearHandles()
 
     def _clearDragState(self) -> None:
         """Reset all transient drag state."""
