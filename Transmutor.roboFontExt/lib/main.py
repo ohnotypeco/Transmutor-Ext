@@ -585,6 +585,8 @@ class DesignSpaceManager:
         self._activeScaler = None
         # (minV, maxV, minH, maxH) stem range of currently-enabled fonts
         self._activeStemRange = (100, 100, 50, 50)
+        # Last error from compensatedInterpolateGlyph; "" means no error.
+        self._lastError: str = ""
 
     # ---- Properties ----
 
@@ -929,21 +931,23 @@ class DesignSpaceManager:
         (x, y) tuple representing the glyph's natural SW position before
         normalisation.
         """
+        self._lastError = ""
         verbosePrint("DesignSpaceManager::compensatedInterpolateGlyph")
         if not self.isLoaded:
-            print("No designspace loaded — choose one from the popup.")
+            self._lastError = "No designspace loaded."
             return None
         if glyphName not in self._defaultFont:
-            print(f"'{glyphName}' not found in default source.")
+            self._lastError = f"\u2018{glyphName}\u2019 not in default source."
             return None
 
         scaler = self._activeScaler
         if scaler is None:
-            print("No MutatorScale scaler available — enable at least 2 sources.")
+            self._lastError = "Enable at least 2 sources."
             return None
 
         upm = self._defaultFont.info.unitsPerEm or 1000
 
+        scaler.mutatorErrors.clear()
         try:
             scaler.set({
                 "width": scaleX / scaleY if scaleY != 0 else 1.0,
@@ -953,12 +957,20 @@ class DesignSpaceManager:
             scaledGlyph = scaler.getScaledGlyph(
                 glyphName, (targetStemV, targetStemH)
             )
-        except Exception as e:
-            print(f"MutatorScale compensation failed for '{glyphName}': {e}")
+        except Exception:
+            self._lastError = f"\u2018{glyphName}\u2019 is incompatible across selected sources."
+            return None
+
+        # Surface any errors the MutatorScale engine accumulated internally.
+        # MutatorScale's own error formatter can raise AttributeError when it
+        # tries to access `.message` on modern exceptions, so we avoid
+        # rendering the raw exception object and use a plain message instead.
+        if scaler.mutatorErrors:
+            self._lastError = f"\u2018{glyphName}\u2019 is incompatible across selected sources."
             return None
 
         if scaledGlyph is None:
-            print(f"MutatorScale returned no glyph for '{glyphName}'.")
+            self._lastError = f"No glyph returned for \u2018{glyphName}\u2019."
             return None
 
         # Normalise so SW corner sits at (0, 0).  This decouples the glyph's
@@ -1011,6 +1023,49 @@ class DesignSpaceManager:
 
         return result
 
+    def defaultStemValues(self, fontPath: str = None) -> tuple:
+        """Return (stemV, stemH) for the source matching fontPath.
+
+        Lookup order:
+        1. The source whose path matches fontPath exactly.
+        2. The default font in the designspace (wght axis default).
+        3. The minimum values from the active stem range.
+        """
+        verbosePrint("DesignSpaceManager::defaultStemValues")
+        if not self.isLoaded:
+            return (100, 50)
+
+        targetFontId = None
+
+        if fontPath:
+            fontPath = os.path.normpath(os.path.abspath(fontPath))
+            for source in self._dsSources:
+                if not source.filename:
+                    continue
+                srcPath = os.path.normpath(
+                    os.path.join(self._dsDir, source.filename)
+                )
+                if srcPath == fontPath:
+                    # Reverse-lookup the font object by source filename
+                    for font, _ in self._allFontLocs:
+                        if self._fontSourceFiles.get(id(font)) == source.filename:
+                            targetFontId = id(font)
+                            break
+                    break
+
+        # Fall back to the default (wght-axis-default) font
+        if targetFontId is None and self._defaultFont is not None:
+            targetFontId = id(self._defaultFont)
+
+        if targetFontId is not None:
+            v, h = self._fontStems.get(targetFontId, (None, None))
+            if v is not None and h is not None:
+                return (v, h)
+
+        # Last resort: minimums of the active stem range
+        minV, _maxV, minH, _maxH = self._activeStemRange
+        return (minV, minH)
+
 
 # ---------------------------------------------------------------------------
 # Controller — TransmutorController (EZUI Panel)
@@ -1034,7 +1089,8 @@ class TransmutorController(ezui.WindowController):
         = TwoColumnForm
         : Glyph:
         [__]                @glyphNameField
-        
+        !*                  @errorLabel
+
         ----------------------
         
         : Designspace:
@@ -1115,6 +1171,7 @@ class TransmutorController(ezui.WindowController):
                 alternatingRowColors=True,
             ),
             glyphNameField=dict(value=DEFAULT_GLYPH_NAME),
+            errorLabel=dict(text="\u00a0"),
             scaleXSlider=dict(minValue=1, maxValue=200, value=100, tickMarks=3),
             scaleYSlider=dict(minValue=1, maxValue=200, value=100, tickMarks=3),
             stemVSlider=dict(minValue=1, maxValue=400, value=100, tickMarks=4),
@@ -1153,6 +1210,9 @@ class TransmutorController(ezui.WindowController):
         self._syncAxisSliders()
         self._syncStemControls()
         self._refreshSubspacePopup()
+        # Set stem sliders to the values of the current font (not the range minimum)
+        stemV, stemH = self._dsManager.defaultStemValues(self._currentFontPath())
+        self.stemValues = (stemV, stemH)
         # Apply initial lock-scale state
         if self.w.getItem("lockScaleCheckbox").get():
             self.w.getItem("scaleXSlider").enable(False)
@@ -1467,7 +1527,9 @@ class TransmutorController(ezui.WindowController):
             targetStemV=stemV, targetStemH=stemH,
         )
         if result is None:
+            self._setError(self._dsManager._lastError)
             return
+        self._clearError()
         mathGlyph, _baseOffset = result
 
         # Preserve existing block color and contour identifiers so that
@@ -1512,7 +1574,9 @@ class TransmutorController(ezui.WindowController):
             targetStemV=stemV, targetStemH=stemH,
         )
         if result is None:
+            self._setError(self._dsManager._lastError)
             return
+        self._clearError()
         mathGlyph, baseOffset = result
 
         # Bake the MutatorScale natural position into the stored offset so
@@ -1565,6 +1629,14 @@ class TransmutorController(ezui.WindowController):
     # UI state
     # -----------------------------------------------------------------------
 
+    def _clearError(self) -> None:
+        """Clear the footnote error label under the glyph name field."""
+        self.w.getItem("errorLabel").set("\u00a0")
+
+    def _setError(self, message: str) -> None:
+        """Show *message* in the footnote label; clear it when message is empty."""
+        self.w.getItem("errorLabel").set(message if message else "\u00a0")
+
     def setDefaults(self) -> None:
         """Reset all controls to initial values and deselect."""
         verbosePrint("TransmutorController::setDefaults")
@@ -1573,13 +1645,13 @@ class TransmutorController(ezui.WindowController):
         self._syncAxisSliders()
         self._refreshSubspacePopup()
 
-        minV, _maxV, minH, _maxH = self._dsManager._activeStemRange
+        stemV, stemH = self._dsManager.defaultStemValues(self._currentFontPath())
         self._state.setState(self,
             selectedBlockID=None,
             glyphName=DEFAULT_GLYPH_NAME,
             scalePercent=(100, 100),
             offset=(0, 0),
-            stemValues=(minV, minH),
+            stemValues=(stemV, stemH),
             linkStems=True,
             lockScale=True,
         )
