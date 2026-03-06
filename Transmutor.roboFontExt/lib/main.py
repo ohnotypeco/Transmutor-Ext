@@ -366,7 +366,7 @@ class BlockData:
             BLOCK_COLOR_KEY: self.color,
             f"{LIB_PREFIX}.glyphName": self.glyphName,
             f"{LIB_PREFIX}.normalizedLocation": dict(self.normalizedLocation),
-            f"{LIB_PREFIX}.offset": list(self.offset),
+            f"{LIB_PREFIX}.transform": [1, 0, 0, 1, self.offset[0], self.offset[1]],
             f"{LIB_PREFIX}.scalePercent": list(self.scalePercent),
             f"{LIB_PREFIX}.stemV": self.stemV,
             f"{LIB_PREFIX}.stemH": self.stemH,
@@ -1263,7 +1263,7 @@ class DesignSpaceManager:
         if not self.isLoaded:
             self._lastError = "No designspace loaded."
             return None
-        if glyphName not in self._defaultFont:
+        if self._defaultFont is None or glyphName not in self._defaultFont:
             self._lastError = f"\u2018{glyphName}\u2019 not in default source."
             return None
 
@@ -1347,7 +1347,7 @@ class DesignSpaceManager:
         for source in self._dsSources:
             if not source.filename:
                 continue
-            srcPath = os.path.normpath(os.path.join(self._dsDir, source.filename))
+            srcPath = os.path.normpath(os.path.join(self._dsDir or "", source.filename))
             if srcPath == fontPath:
                 loc = source.location or {}
                 for axis in self._op.doc.axes:
@@ -1386,7 +1386,7 @@ class DesignSpaceManager:
             for source in self._dsSources:
                 if not source.filename:
                     continue
-                srcPath = os.path.normpath(os.path.join(self._dsDir, source.filename))
+                srcPath = os.path.normpath(os.path.join(self._dsDir or "", source.filename))
                 if srcPath == fontPath:
                     # Reverse-lookup the font object by source filename
                     for font, _ in self._allFontLocs:
