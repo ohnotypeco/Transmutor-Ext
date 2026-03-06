@@ -83,7 +83,7 @@ AllFonts = getattr(builtins, "AllFonts", None)
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-VERBOSE = True
+VERBOSE = False  # Set to True to enable verbosePrint debug output
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
