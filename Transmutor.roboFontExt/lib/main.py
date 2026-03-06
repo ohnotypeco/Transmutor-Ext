@@ -11,6 +11,7 @@ Architecture (MVC, single file):
     Helpers:    Block CRUD functions operate on fontParts glyphs directly
 """
 
+import builtins
 import colorsys
 import math
 import os
@@ -41,6 +42,15 @@ finally:
 
 
 # ---------------------------------------------------------------------------
+# Optional RoboFont extension builtins
+# ---------------------------------------------------------------------------
+# AllDesignspaces and CurrentDesignspace are injected into the global namespace
+# by the DesignSpaceEditor extension.  Fall back to None when absent.
+AllDesignspaces = getattr(builtins, "AllDesignspaces", None)
+CurrentDesignspace = getattr(builtins, "CurrentDesignspace", None)
+
+
+# ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 VERBOSE = True
@@ -53,6 +63,8 @@ LIB_PREFIX = "co.ohnotype.transmutor"
 CONTOUR_SOURCE_KEY = f"{LIB_PREFIX}.source"
 BLOCK_ID_KEY = f"{LIB_PREFIX}.blockID"
 BLOCK_COLOR_KEY = f"{LIB_PREFIX}.color"
+# Font lib key used to persist the last-used designspace path across sessions.
+FONT_LIB_DS_KEY = f"{LIB_PREFIX}.lastDesignspace"
 
 BLOCK_STROKE_WIDTH = 8
 OUTLINE_ALPHA = 0.1
@@ -768,8 +780,9 @@ class DesignSpaceManager:
                                 normDiscrete[dAxis.tag] = 0.0
                             valStr = (str(int(userVal)) if userVal == int(userVal)
                                       else f"{userVal:.4g}")
+                            axisLabel = dAxis.name or dAxis.tag
                             discreteLabelParts.append(
-                                f"{dAxis.tag} {valStr}")
+                                f"{axisLabel} {valStr}")
 
                     # Further group by continuous non-wght axis values (e.g. wdth).
                     contSubspaceMap = {}
@@ -807,6 +820,9 @@ class DesignSpaceManager:
                             id(refFont), (None, None))
 
                         # Build human-readable label.
+                        # Use full axis name (not the 4-letter tag), a
+                        # thin · separator between parts, and clean integer
+                        # formatting for whole-number values.
                         labelParts = list(discreteLabelParts)
                         for name, designVal in contKey:
                             axis = next(
@@ -816,8 +832,9 @@ class DesignSpaceManager:
                                 uVal = axis.map_backward(designVal)
                                 valStr = (str(int(uVal)) if uVal == int(uVal)
                                           else f"{uVal:.4g}")
-                                labelParts.append(f"{axis.tag} {valStr}")
-                        label = "  ".join(labelParts) if labelParts else "Default"
+                                axisLabel = axis.name or axis.tag
+                                labelParts.append(f"{axisLabel} {valStr}")
+                        label = " — ".join(labelParts) if labelParts else "Default"
 
                         # Tuple format: (label, normNonWght, fonts_list, refStems)
                         # fonts_list holds original defcon.Font objects.
@@ -1244,20 +1261,27 @@ class TransmutorController(ezui.WindowController):
         )
 
         # Pre-populate with any open designspaces
-        try:
+        if AllDesignspaces is not None:
             for ds in (AllDesignspaces() or []):
-                self.addDesignSpace(ds.path)
-        except Exception:
-            pass
+                if ds.path:
+                    self.addDesignSpace(ds.path)
 
-        try:
+        # Load the current designspace if one is open
+        if CurrentDesignspace is not None:
             current = CurrentDesignspace()
             if current and current.path:
                 self.loadDesignSpace(current.path)
-        except Exception:
-            pass
 
-        # If no current DS but we have registered ones, load the first
+        # Fall back to the path stored in the current font's lib
+        if not self._dsManager.isLoaded:
+            font = CurrentFont()
+            if font is not None:
+                savedPath = font.lib.get(FONT_LIB_DS_KEY)
+                if savedPath and os.path.isfile(savedPath):
+                    self.addDesignSpace(savedPath)
+                    self.loadDesignSpace(savedPath)
+
+        # If still no DS but we have registered ones, load the first
         if not self._dsManager.isLoaded and self._dsManager.paths:
             self.loadDesignSpace(self._dsManager.paths[0])
 
@@ -1419,6 +1443,11 @@ class TransmutorController(ezui.WindowController):
         idx = self._dsManager.indexForPath(path)
         if idx >= 0:
             self.w.getItem("designspacePopupButton").set(idx)
+        # Persist path to the current font's lib so the tool can restore it
+        # automatically next time without requiring the user to re-open the DS.
+        font = CurrentFont()
+        if font is not None:
+            font.lib[FONT_LIB_DS_KEY] = path
         self._syncAxisSliders()
         self._syncStemControls()
         self._refreshSubspacePopup()
@@ -1700,22 +1729,22 @@ class TransmutorController(ezui.WindowController):
         self.w.getItem("errorLabel").set(message if message else "\u00a0")
 
     def setDefaults(self) -> None:
-        """Reset all controls to initial values and deselect."""
+        """Deselect and reset selection-specific controls.
+
+        Stem values, scale, link/lock state are intentionally preserved so
+        that inserting a new block in a different glyph reuses the last
+        settings without the user having to re-dial them in.
+        """
         verbosePrint("TransmutorController::setDefaults")
         # Sync normalised location to the current font, then re-pick the best
         # subspace so the source table and stem ranges reflect the active font.
         self._syncAxisSliders()
         self._refreshSubspacePopup()
 
-        stemV, stemH = self._dsManager.defaultStemValues(self._currentFontPath())
         self._state.setState(self,
             selectedBlockID=None,
             glyphName=DEFAULT_GLYPH_NAME,
-            scalePercent=(100, 100),
             offset=(0, 0),
-            stemValues=(stemV, stemH),
-            linkStems=True,
-            lockScale=True,
         )
 
     def selectBlock(self, data: "BlockData") -> None:
