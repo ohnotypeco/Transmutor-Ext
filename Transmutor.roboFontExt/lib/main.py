@@ -44,12 +44,15 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Optional
 
+import defcon
 import ezui
 from AppKit import NSMenuItem
-from mojo.events import BaseEventTool, installTool
 from fontTools.designspaceLib.split import splitInterpolable
-from ufoProcessor.ufoOperator import UFOOperator
+from fontTools.pens.pointInsidePen import PointInsidePen
+from mojo.events import BaseEventTool, installTool
 from mojo.UI import CurrentGlyphWindow, GetFile, getDefault, setDefault
+from ufoProcessor.emptyPen import DecomposePointPen
+from ufoProcessor.ufoOperator import UFOOperator
 
 try:
     import mutatorScale
@@ -95,6 +98,7 @@ FONT_LIB_DS_KEY = f"{LIB_PREFIX}.lastDesignspace"
 BLOCK_STROKE_WIDTH = 8
 OUTLINE_ALPHA = 0.1
 HANDLE_SIZE = 10
+DUPLICATE_NUDGE = 10  # font units offset applied to X and Y when duplicating a block
 
 # macOS key codes used in keyDown
 _KEY_BACKSPACE = 51
@@ -266,6 +270,11 @@ class BlockEditState:
         w.getItem("stemVSlider").enable(dsLoaded)
         w.getItem("stemHSlider").enable(dsLoaded and not self.linkStems)
         w.getItem("linkStemsCheckbox").enable(dsLoaded)
+
+        # Footer buttons
+        blockSelected = self.selectedBlockID is not None
+        w.getItem("removeButton").enable(blockSelected)
+        w.getItem("insertButton").setTitle("Duplicate" if blockSelected else "Insert")
 
 
 @dataclass
@@ -743,6 +752,9 @@ class DesignSpaceManager:
         self._activeScaler = None
         # (minV, maxV, minH, maxH) stem range of currently-enabled fonts
         self._activeStemRange = (100, 100, 50, 50)
+        # Cache of decomposed glyphs: {glyphName: {master_name: defcon.Glyph}}
+        # Invalidated whenever the scaler is rebuilt.
+        self._decomposedGlyphCache: dict = {}
         # Last error from compensatedInterpolateGlyph; "" means no error.
         self._lastError: str = ""
 
@@ -844,6 +856,15 @@ class DesignSpaceManager:
         try:
             self._op = UFOOperator(path, useVarlib=False, extrapolate=True)
             self._op.loadFonts()
+            # Swap any already-open RoboFont instances into UFOOperator so it
+            # uses the in-memory defcon objects rather than the freshly-loaded
+            # disk copies.  This avoids redundant UFO reads for open sources.
+            if AllFonts is not None:
+                openDefconFonts = [
+                    f.naked() for f in AllFonts() if f.path is not None
+                ]
+                if openDefconFonts:
+                    self._op.updateFonts(openDefconFonts)
             ds = self._op.doc
             self._wghtAxis = next((a for a in ds.axes if a.tag == "wght"), None)
             self._dsSources = ds.sources
@@ -858,6 +879,7 @@ class DesignSpaceManager:
             self._fontSourceFiles = {}
             self._activeScaler = None
             self._activeStemRange = (100, 100, 50, 50)
+            self._decomposedGlyphCache.clear()
             try:
                 nonWghtAxes = [a for a in ds.axes if a.tag != "wght"]
                 wghtAxisName = self._wghtAxis.name if self._wghtAxis else None
@@ -1018,13 +1040,11 @@ class DesignSpaceManager:
                         )
 
                 # Activate the first subspace by default.
+                # Note: the scaler is intentionally NOT built here — loadDesignSpace
+                # always calls _refreshSubspacePopup → _refreshSourceTable →
+                # rebuildScalerFromFonts immediately after load(), so building it
+                # here would be wasted work.
                 if self._subspaceScalers:
-                    _, _, initFonts, _initStems = self._subspaceScalers[0]
-                    try:
-                        self._activeScaler = MutatorScaleEngine(initFonts)
-                        self._activeStemRange = self._stemRangeForFonts(initFonts)
-                    except Exception as e:
-                        print(f"MutatorScale initial build failed: {e}")
                     print(
                         f"Transmutor: built {len(self._subspaceScalers)} subspace(s)."
                     )
@@ -1228,6 +1248,7 @@ class DesignSpaceManager:
         except Exception as e:
             print(f"MutatorScale rebuild failed: {e}")
             self._activeScaler = None
+        self._decomposedGlyphCache.clear()
 
     def compensatedInterpolateGlyph(
         self,
@@ -1283,7 +1304,42 @@ class DesignSpaceManager:
                     "referenceHeight": upm,
                 }
             )
-            scaledGlyph = scaler.getScaledGlyph(glyphName, (targetStemV, targetStemH))
+            # If any source glyph has components, temporarily inject
+            # decomposed versions into each master's glyphSet so that
+            # MutatorScale interpolates actual outlines rather than
+            # component offsets (which it resets to identity during scaling).
+            # Decomposed results are cached by glyph name and invalidated
+            # when the scaler is rebuilt, so slider drags don't re-decompose.
+            savedGlyphs = {}
+            needsDecompose = (
+                glyphName in self._defaultFont
+                and bool(self._defaultFont[glyphName].components)
+            )
+            if needsDecompose:
+                cachedForGlyph = self._decomposedGlyphCache.get(glyphName)
+                if cachedForGlyph is None:
+                    cachedForGlyph = {}
+                    for master in scaler.masters.values():
+                        gs = master.glyphSet
+                        if glyphName not in gs:
+                            continue
+                        tempGlyph = defcon.Glyph()
+                        gs[glyphName].drawPoints(
+                            DecomposePointPen(gs, tempGlyph.getPointPen())
+                        )
+                        tempGlyph.width = gs[glyphName].width
+                        tempGlyph.name = glyphName
+                        cachedForGlyph[master] = tempGlyph
+                    self._decomposedGlyphCache[glyphName] = cachedForGlyph
+                for master, tempGlyph in cachedForGlyph.items():
+                    savedGlyphs[master] = master.glyphSet[glyphName]
+                    master.glyphSet[glyphName] = tempGlyph
+            try:
+                scaledGlyph = scaler.getScaledGlyph(glyphName, (targetStemV, targetStemH))
+            finally:
+                # Always restore originals so the scaler stays consistent.
+                for master, original in savedGlyphs.items():
+                    master.glyphSet[glyphName] = original
         except Exception:
             self._lastError = (
                 f"\u2018{glyphName}\u2019 is incompatible across selected sources."
@@ -1469,12 +1525,10 @@ class TransmutorController(ezui.WindowController):
         : Width:
         ---X--- [__]        @scaleXSlider
         [X] Constrain      @lockScaleCheckbox
-        """
-
-        footer = """
-        * HorizontalStack
-        > (Insert)          @insertButton
-        > (Remove)          @removeButton
+        
+        =======================
+        (Remove)          @removeButton
+        (Insert)          @insertButton
         """
 
         descriptionData = dict(
@@ -1532,7 +1586,6 @@ class TransmutorController(ezui.WindowController):
         self.w = ezui.EZPanel(
             title="Transmutor",
             content=content,
-            footer=footer,
             descriptionData=descriptionData,
             controller=self,
             size=(500, "auto"),
@@ -1992,12 +2045,16 @@ class TransmutorController(ezui.WindowController):
         # Bake the MutatorScale natural position into the stored offset so
         # the block appears at its natural location.  The user's panel offset
         # (ox, oy) is added on top (typically 0, 0 for a brand-new block).
+        # When duplicating an existing block, nudge by 10 units so the copy
+        # isn't placed directly on top of the original.
+        isDuplicate = self._state.selectedBlockID is not None
+        nudge = DUPLICATE_NUDGE if isDuplicate else 0
         absoluteOffset = (
-            int(round(baseOffset[0] + ox)),
-            int(round(baseOffset[1] + oy)),
+            int(round(baseOffset[0] + ox + nudge)),
+            int(round(baseOffset[1] + oy - nudge)),
         )
 
-        g.prepareUndo("Insert Block")
+        g.prepareUndo("Duplicate Block" if isDuplicate else "Insert Block")
         blockData = BlockData(
             blockID=str(uuid.uuid4()),
             dsRelPath=self._dsManager.currentRelPath,
@@ -2020,6 +2077,8 @@ class TransmutorController(ezui.WindowController):
             # actual position, keeping the SW corner pinned on future
             # scale changes.
             self._state.offset = absoluteOffset
+            self.w.getItem("removeButton").enable(True)
+            self.w.getItem("insertButton").setTitle("Duplicate")
         self._requestRedraw(g)
 
     def removeSelectedBlock(self) -> None:
@@ -2034,6 +2093,8 @@ class TransmutorController(ezui.WindowController):
         _removeBlockContours(g, self._state.selectedBlockID)
         _scrubOrphanedObjectLibs(g)
         self._state.selectedBlockID = None
+        self.w.getItem("removeButton").enable(False)
+        self.w.getItem("insertButton").setTitle("Insert")
         g.performUndo()
         self._requestRedraw(g)
 
@@ -2577,7 +2638,13 @@ class TransmutorTool(BaseEventTool):
         return None
 
     def _hitTestBlocks(self, point, glyph) -> Optional[tuple]:
-        """Return the first block whose bounding box contains point.
+        """Return the first block whose filled area contains point.
+
+        Uses a two-stage test: fast bounding-box reject first, then a
+        precise winding-number (non-zero fill rule) test via PointInsidePen
+        so that open counter space (e.g. the interior of an L bounding box)
+        does not register as a hit.  Falls back to the bounds test for any
+        block that contains open contours.
 
         Args:
             point: Mouse point with .x and .y in glyph-space coordinates.
@@ -2588,8 +2655,25 @@ class TransmutorTool(BaseEventTool):
         """
         verbosePrint("TransmutorTool::_hitTestBlocks")
         for blockID, info in _getBlocksFromGlyph(glyph).items():
-            bounds = _unionBounds(info["contours"])
-            if _pointInBounds(point, bounds):
+            contours = info["contours"]
+            bounds = _unionBounds(contours)
+            # Quick reject: skip the expensive pen test entirely
+            if not _pointInBounds(point, bounds):
+                continue
+            # Precise winding test: draws all contours of the block together
+            # so the non-zero fill rule correctly excludes counter space.
+            try:
+                pen = PointInsidePen(
+                    glyphSet=None,
+                    testPoint=(point.x, point.y),
+                    evenOdd=False,
+                )
+                for contour in contours:
+                    contour.draw(pen)
+                if pen.getResult():
+                    return blockID, info["data"]
+            except NotImplementedError:
+                # Open contour in the block — bounds hit is good enough.
                 return blockID, info["data"]
         return None
 
