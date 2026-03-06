@@ -33,7 +33,10 @@ try:
 except ImportError:
     _mutatorScaleLib = os.path.join(
         os.path.dirname(os.path.abspath(__file__)),
-        "..", "submodules", "MutatorScale", "lib"
+        "..",
+        "submodules",
+        "MutatorScale",
+        "lib",
     )
     site.addsitedir(_mutatorScaleLib)
 finally:
@@ -81,20 +84,21 @@ _HANDLE_NAMES = ("SW", "S", "SE", "E", "NE", "N", "NW", "W")
 # handleNorm / anchorNorm: normalised (u, v) within bounds — (0,0)=SW, (1,1)=NE.
 # scaleH / scaleV: which axes the handle controls.
 _HANDLE_SCALING_INFO = {
-    "SW": dict(handleNorm=(0.0, 0.0), anchorNorm=(1.0, 1.0), scaleH=True,  scaleV=True),
-    "S":  dict(handleNorm=(0.5, 0.0), anchorNorm=(0.5, 1.0), scaleH=False, scaleV=True),
-    "SE": dict(handleNorm=(1.0, 0.0), anchorNorm=(0.0, 1.0), scaleH=True,  scaleV=True),
-    "E":  dict(handleNorm=(1.0, 0.5), anchorNorm=(0.0, 0.5), scaleH=True,  scaleV=False),
-    "NE": dict(handleNorm=(1.0, 1.0), anchorNorm=(0.0, 0.0), scaleH=True,  scaleV=True),
-    "N":  dict(handleNorm=(0.5, 1.0), anchorNorm=(0.5, 0.0), scaleH=False, scaleV=True),
-    "NW": dict(handleNorm=(0.0, 1.0), anchorNorm=(1.0, 0.0), scaleH=True,  scaleV=True),
-    "W":  dict(handleNorm=(0.0, 0.5), anchorNorm=(1.0, 0.5), scaleH=True,  scaleV=False),
+    "SW": dict(handleNorm=(0.0, 0.0), anchorNorm=(1.0, 1.0), scaleH=True, scaleV=True),
+    "S": dict(handleNorm=(0.5, 0.0), anchorNorm=(0.5, 1.0), scaleH=False, scaleV=True),
+    "SE": dict(handleNorm=(1.0, 0.0), anchorNorm=(0.0, 1.0), scaleH=True, scaleV=True),
+    "E": dict(handleNorm=(1.0, 0.5), anchorNorm=(0.0, 0.5), scaleH=True, scaleV=False),
+    "NE": dict(handleNorm=(1.0, 1.0), anchorNorm=(0.0, 0.0), scaleH=True, scaleV=True),
+    "N": dict(handleNorm=(0.5, 1.0), anchorNorm=(0.5, 0.0), scaleH=False, scaleV=True),
+    "NW": dict(handleNorm=(0.0, 1.0), anchorNorm=(1.0, 0.0), scaleH=True, scaleV=True),
+    "W": dict(handleNorm=(0.0, 0.5), anchorNorm=(1.0, 0.5), scaleH=True, scaleV=False),
 }
 
 
 # ---------------------------------------------------------------------------
 # State containers
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class DragState:
@@ -110,21 +114,21 @@ class DragState:
 
     # Offset drag
     dragging: bool = False
-    dragStartPoint: Optional[tuple] = None       # (x, y) mouse pos at drag start
-    dragStartOffset: Optional[tuple] = None      # (ox, oy) controller offset snapshot
+    dragStartPoint: Optional[tuple] = None  # (x, y) mouse pos at drag start
+    dragStartOffset: Optional[tuple] = None  # (ox, oy) controller offset snapshot
 
     # Scale drag
-    scalingHandle: Optional[str] = None          # compass name e.g. "NE", or None
-    scalingAnchor: Optional[tuple] = None        # (x, y) opposite corner
-    scalingHandleXY: Optional[tuple] = None      # (x, y) handle pos at start
+    scalingHandle: Optional[str] = None  # compass name e.g. "NE", or None
+    scalingAnchor: Optional[tuple] = None  # (x, y) opposite corner
+    scalingHandleXY: Optional[tuple] = None  # (x, y) handle pos at start
     scalingStartScaleX: Optional[float] = None
     scalingStartScaleY: Optional[float] = None
     scalingStartScalesEqual: bool = True
-    scalingStartOffset: Optional[tuple] = None   # (ox, oy) offset snapshot
+    scalingStartOffset: Optional[tuple] = None  # (ox, oy) offset snapshot
 
     # Stem drag
     stemDragging: bool = False
-    stemDragStartPoint: Optional[tuple] = None   # (x, y) mouse pos at drag start
+    stemDragStartPoint: Optional[tuple] = None  # (x, y) mouse pos at drag start
     stemDragStartV: Optional[float] = None
     stemDragStartH: Optional[float] = None
 
@@ -240,21 +244,22 @@ class BlockData:
     Use fromRawDict() to deserialize and toRawDict() to serialize.
     """
 
-    blockID: str                        # UUID string; generate with uuid.uuid4()
-    dsRelPath: str                      # SCRIPT_DIR-relative .designspace path
+    blockID: str  # UUID string; generate with uuid.uuid4()
+    dsRelPath: str  # SCRIPT_DIR-relative .designspace path
     glyphName: str
-    normalizedLocation: dict            # {axisTag: normalizedValue}
-    offset: tuple                       # (dx, dy) integer pixel offset
-    scalePercent: tuple                 # (sx%, sy%) e.g. (100, 150)
+    normalizedLocation: dict  # {axisTag: normalizedValue}
+    offset: tuple  # (dx, dy) integer pixel offset
+    scalePercent: tuple  # (sx%, sy%) e.g. (100, 150)
     stemV: float
     stemH: float
     linkStems: bool
-    enabledSources: list                # DS-relative source filenames
-    color: Optional[list] = None        # [R, G, B]; None → auto-generated on insert
+    enabledSources: list  # DS-relative source filenames
+    color: Optional[list] = None  # [R, G, B]; None → auto-generated on insert
 
     @classmethod
-    def fromRawDict(cls, raw: dict,
-                    stemRange: tuple = (100, 100, 50, 50)) -> "BlockData":
+    def fromRawDict(
+        cls, raw: dict, stemRange: tuple = (100, 100, 50, 50)
+    ) -> "BlockData":
         """Deserialize from a public.objectLibs entry.
 
         Handles both current keys and legacy stemRatioV/stemRatioH and
@@ -327,6 +332,7 @@ class BlockData:
 # Pure utility functions
 # ---------------------------------------------------------------------------
 
+
 def verbosePrint(s):
     if VERBOSE:
         print(s)
@@ -348,14 +354,14 @@ def _handlePositions(bounds) -> list:
     midX = (xMin + xMax) / 2
     midY = (yMin + yMax) / 2
     return [
-        (xMin, yMin),   # SW
-        (midX, yMin),   # S
-        (xMax, yMin),   # SE
-        (xMax, midY),   # E
-        (xMax, yMax),   # NE
-        (midX, yMax),   # N
-        (xMin, yMax),   # NW
-        (xMin, midY),   # W
+        (xMin, yMin),  # SW
+        (midX, yMin),  # S
+        (xMax, yMin),  # SE
+        (xMax, midY),  # E
+        (xMax, yMax),  # NE
+        (midX, yMax),  # N
+        (xMin, yMax),  # NW
+        (xMin, midY),  # W
     ]
 
 
@@ -407,8 +413,10 @@ def _generateBlockColor(glyph) -> list:
 
     candidates = [i / 12.0 for i in range(12)]
     if existingHues:
+
         def _minCircularDist(h: float) -> float:
             return min(min(abs(h - e), 1.0 - abs(h - e)) for e in existingHues)
+
         hue = max(candidates, key=_minCircularDist)
         hue = (hue + random.uniform(-0.02, 0.02)) % 1.0
     else:
@@ -437,6 +445,7 @@ def _userToNormalized(axis, userValue: float) -> float:
 # Block CRUD — pure glyph-level operations
 # ---------------------------------------------------------------------------
 
+
 def _getBlocksFromGlyph(glyph) -> dict:
     """Return {blockID: {"contours": [...], "data": BlockData}} for tagged contours."""
     verbosePrint("_getBlocksFromGlyph")
@@ -460,8 +469,10 @@ def _removeBlockContours(glyph, blockID: str) -> int:
     verbosePrint("_removeBlockContours")
     objectLibs = dict(glyph.lib.get(OBJECT_LIBS_KEY, {}))
     toRemove = [
-        c for c in glyph.contours
-        if c.identifier and objectLibs.get(c.identifier, {}).get(BLOCK_ID_KEY) == blockID
+        c
+        for c in glyph.contours
+        if c.identifier
+        and objectLibs.get(c.identifier, {}).get(BLOCK_ID_KEY) == blockID
     ]
     for contour in toRemove:
         del objectLibs[contour.identifier]
@@ -510,8 +521,9 @@ def _forceContourIdentifier(glyph, contour, newId: str) -> None:
     identifiers.add(newId)
 
 
-def _insertTaggedContours(glyph, glyphMathObj, data: "BlockData",
-                          preserveIdentifiers: list = None) -> list:
+def _insertTaggedContours(
+    glyph, glyphMathObj, data: "BlockData", preserveIdentifiers: list = None
+) -> list:
     """Draw interpolated contours into glyph, apply offset, and tag in objectLibs.
 
     If data.color is None a new color is auto-generated from existing block hues.
@@ -529,7 +541,7 @@ def _insertTaggedContours(glyph, glyphMathObj, data: "BlockData",
         data.color = _generateBlockColor(glyph)
 
     countBefore = len(glyph)
-    if hasattr(glyphMathObj, 'drawPoints'):
+    if hasattr(glyphMathObj, "drawPoints"):
         glyphMathObj.drawPoints(glyph.getPointPen())
     else:
         glyphMathObj.draw(glyph.getPen())
@@ -565,6 +577,7 @@ def _insertTaggedContours(glyph, glyphMathObj, data: "BlockData",
 # Model — DesignSpaceManager
 # ---------------------------------------------------------------------------
 
+
 class DesignSpaceManager:
     """Manages designspace paths, font sources, subspaces, and interpolation.
 
@@ -578,7 +591,7 @@ class DesignSpaceManager:
 
     def __init__(self):
         verbosePrint("DesignSpaceManager::__init__")
-        self._paths = []         # ordered list of absolute, normalised paths
+        self._paths = []  # ordered list of absolute, normalised paths
         self._wghtAxis = None
         self._op = None
         self._dsRelPath = None
@@ -591,8 +604,8 @@ class DesignSpaceManager:
         # All (font, designLoc) pairs from the loaded DS, in source order
         self._allFontLocs = []
         # Per-font display label and reference stems
-        self._fontLabels = {}   # id(font) -> str
-        self._fontStems = {}    # id(font) -> (vstem, hstem)
+        self._fontLabels = {}  # id(font) -> str
+        self._fontStems = {}  # id(font) -> (vstem, hstem)
         self._fontSourceFiles = {}  # id(font) -> DS-relative source filename
         # Active scaler, rebuilt from currently-enabled fonts
         self._activeScaler = None
@@ -619,9 +632,11 @@ class DesignSpaceManager:
     def isLoaded(self) -> bool:
         """True when a designspace has been successfully loaded."""
         verbosePrint("DesignSpaceManager::isLoaded")
-        return (self._op is not None
-                and self._defaultFont is not None
-                and self._wghtAxis is not None)
+        return (
+            self._op is not None
+            and self._defaultFont is not None
+            and self._wghtAxis is not None
+        )
 
     @property
     def wghtAxis(self):
@@ -676,8 +691,7 @@ class DesignSpaceManager:
             self._op = UFOOperator(path, useVarlib=False, extrapolate=True)
             self._op.loadFonts()
             ds = self._op.doc
-            self._wghtAxis = next(
-                (a for a in ds.axes if a.tag == "wght"), None)
+            self._wghtAxis = next((a for a in ds.axes if a.tag == "wght"), None)
             self._dsSources = ds.sources
             self._dsDir = os.path.dirname(path)
             self._dsRelPath = os.path.relpath(path, SCRIPT_DIR)
@@ -695,7 +709,8 @@ class DesignSpaceManager:
                 wghtAxisName = self._wghtAxis.name if self._wghtAxis else None
                 wghtAxisDefault = (
                     self._wghtAxis.map_forward(self._wghtAxis.default)
-                    if self._wghtAxis else 0
+                    if self._wghtAxis
+                    else 0
                 )
 
                 # Collect all (defcon.Font, designLoc) pairs once.
@@ -715,13 +730,11 @@ class DesignSpaceManager:
                     if src and src.familyName and src.styleName:
                         label = f"{src.familyName} {src.styleName}"
                     elif src and src.filename:
-                        label = os.path.splitext(
-                            os.path.basename(src.filename))[0]
+                        label = os.path.splitext(os.path.basename(src.filename))[0]
                     else:
                         label = "?"
                     self._fontLabels[id(font)] = label
-                    self._fontSourceFiles[id(
-                        font)] = src.filename if src else None
+                    self._fontSourceFiles[id(font)] = src.filename if src else None
                     try:
                         v, h = getRefStems(font)
                         # Discard implausible zero measurements
@@ -736,24 +749,23 @@ class DesignSpaceManager:
                 # Discrete axes (e.g. ital) are split via splitInterpolable;
                 # continuous non-wght axes (e.g. wdth) are then grouped within
                 # each discrete sub-space.
-                discreteAxes = [a for a in ds.axes if hasattr(a, 'values')]
-                contNonWghtAxes = [
-                    a for a in nonWghtAxes if not hasattr(a, 'values')]
+                discreteAxes = [a for a in ds.axes if hasattr(a, "values")]
+                contNonWghtAxes = [a for a in nonWghtAxes if not hasattr(a, "values")]
                 contNonWghtAxisNames = {a.name for a in contNonWghtAxes}
 
                 # Build a path → (font, designLoc) lookup for sub-space matching.
                 pathToFontLoc = {}
                 for font, designLoc in allFontLocs:
-                    fontPath = getattr(font, 'path', None)
+                    fontPath = getattr(font, "path", None)
                     if fontPath:
-                        pathToFontLoc[os.path.normpath(fontPath)] = (
-                            font, designLoc)
+                        pathToFontLoc[os.path.normpath(fontPath)] = (font, designLoc)
 
                 # splitInterpolable yields one sub-doc per combination of
                 # discrete axis values; yields a single (empty, full doc) when
                 # there are no discrete axes.
                 for discreteLoc, subDoc in splitInterpolable(
-                        ds, makeNames=False, expandLocations=False):
+                    ds, makeNames=False, expandLocations=False
+                ):
 
                     # Match sub-doc sources to the already-loaded fonts.
                     subFontLocs = []
@@ -769,30 +781,36 @@ class DesignSpaceManager:
                     discreteLabelParts = []
                     for axisName, userVal in discreteLoc.items():
                         dAxis = next(
-                            (a for a in discreteAxes if a.name == axisName),
-                            None)
+                            (a for a in discreteAxes if a.name == axisName), None
+                        )
                         if dAxis is not None:
                             try:
                                 idx = dAxis.values.index(userVal)
                                 normDiscrete[dAxis.tag] = idx / max(
-                                    1, len(dAxis.values) - 1)
+                                    1, len(dAxis.values) - 1
+                                )
                             except ValueError:
                                 normDiscrete[dAxis.tag] = 0.0
-                            valStr = (str(int(userVal)) if userVal == int(userVal)
-                                      else f"{userVal:.4g}")
+                            valStr = (
+                                str(int(userVal))
+                                if userVal == int(userVal)
+                                else f"{userVal:.4g}"
+                            )
                             axisLabel = dAxis.name or dAxis.tag
-                            discreteLabelParts.append(
-                                f"{axisLabel} {valStr}")
+                            discreteLabelParts.append(f"{axisLabel} {valStr}")
 
                     # Further group by continuous non-wght axis values (e.g. wdth).
                     contSubspaceMap = {}
                     for font, designLoc in subFontLocs:
-                        contKey = tuple(sorted(
-                            (name, designLoc.get(name, 0.0))
-                            for name in contNonWghtAxisNames
-                        ))
-                        contSubspaceMap.setdefault(
-                            contKey, []).append((font, designLoc))
+                        contKey = tuple(
+                            sorted(
+                                (name, designLoc.get(name, 0.0))
+                                for name in contNonWghtAxisNames
+                            )
+                        )
+                        contSubspaceMap.setdefault(contKey, []).append(
+                            (font, designLoc)
+                        )
 
                     for contKey, fontLocs in contSubspaceMap.items():
                         if len(fontLocs) < 2:
@@ -803,21 +821,21 @@ class DesignSpaceManager:
                         normNonWght = dict(normDiscrete)
                         for name, designVal in contKey:
                             axis = next(
-                                (a for a in contNonWghtAxes if a.name == name),
-                                None)
+                                (a for a in contNonWghtAxes if a.name == name), None
+                            )
                             if axis is not None:
                                 userVal = axis.map_backward(designVal)
-                                normNonWght[axis.tag] = _userToNormalized(
-                                    axis, userVal)
+                                normNonWght[axis.tag] = _userToNormalized(axis, userVal)
 
                         refFont, _ = min(
                             fontLocs,
-                            key=lambda fl: abs(
-                                fl[1].get(wghtAxisName, 0) - wghtAxisDefault)
-                            if wghtAxisName else 0,
+                            key=lambda fl: (
+                                abs(fl[1].get(wghtAxisName, 0) - wghtAxisDefault)
+                                if wghtAxisName
+                                else 0
+                            ),
                         )
-                        subStems = self._fontStems.get(
-                            id(refFont), (None, None))
+                        subStems = self._fontStems.get(id(refFont), (None, None))
 
                         # Build human-readable label.
                         # Use full axis name (not the 4-letter tag), a
@@ -826,12 +844,15 @@ class DesignSpaceManager:
                         labelParts = list(discreteLabelParts)
                         for name, designVal in contKey:
                             axis = next(
-                                (a for a in contNonWghtAxes if a.name == name),
-                                None)
+                                (a for a in contNonWghtAxes if a.name == name), None
+                            )
                             if axis is not None:
                                 uVal = axis.map_backward(designVal)
-                                valStr = (str(int(uVal)) if uVal == int(uVal)
-                                          else f"{uVal:.4g}")
+                                valStr = (
+                                    str(int(uVal))
+                                    if uVal == int(uVal)
+                                    else f"{uVal:.4g}"
+                                )
                                 axisLabel = axis.name or axis.tag
                                 labelParts.append(f"{axisLabel} {valStr}")
                         label = " — ".join(labelParts) if labelParts else "Default"
@@ -839,19 +860,20 @@ class DesignSpaceManager:
                         # Tuple format: (label, normNonWght, fonts_list, refStems)
                         # fonts_list holds original defcon.Font objects.
                         self._subspaceScalers.append(
-                            (label, normNonWght, fonts, subStems))
+                            (label, normNonWght, fonts, subStems)
+                        )
 
                 # Activate the first subspace by default.
                 if self._subspaceScalers:
                     _, _, initFonts, _initStems = self._subspaceScalers[0]
                     try:
                         self._activeScaler = MutatorScaleEngine(initFonts)
-                        self._activeStemRange = self._stemRangeForFonts(
-                            initFonts)
+                        self._activeStemRange = self._stemRangeForFonts(initFonts)
                     except Exception as e:
                         print(f"MutatorScale initial build failed: {e}")
                     print(
-                        f"Transmutor: built {len(self._subspaceScalers)} subspace(s).")
+                        f"Transmutor: built {len(self._subspaceScalers)} subspace(s)."
+                    )
                 else:
                     print("Transmutor: no scaled subspace with ≥2 sources found.")
             except Exception as e:
@@ -907,12 +929,14 @@ class DesignSpaceManager:
         rows = []
         for font, _ in self._allFontLocs:
             vstem, hstem = self._fontStems.get(id(font), (None, None))
-            rows.append({
-                "selected": id(font) in activeFontIdSet,
-                "name": self._fontLabels.get(id(font), "?"),
-                "vStem": vstem if vstem is not None else "—",
-                "hStem": hstem if hstem is not None else "—",
-            })
+            rows.append(
+                {
+                    "selected": id(font) in activeFontIdSet,
+                    "name": self._fontLabels.get(id(font), "?"),
+                    "vStem": vstem if vstem is not None else "—",
+                    "hStem": hstem if hstem is not None else "—",
+                }
+            )
         return rows
 
     def fontsFromTableItems(self, items: list) -> list:
@@ -940,7 +964,8 @@ class DesignSpaceManager:
         verbosePrint("DesignSpaceManager::sourceFilesFontIdSet")
         fnSet = set(filenames)
         return {
-            id(f) for f, _ in self._allFontLocs
+            id(f)
+            for f, _ in self._allFontLocs
             if self._fontSourceFiles.get(id(f)) in fnSet
         }
 
@@ -952,12 +977,14 @@ class DesignSpaceManager:
         """
         verbosePrint("DesignSpaceManager::_stemRangeForFonts")
         vStems = [
-            v for f in fonts
+            v
+            for f in fonts
             for v, _h in [self._fontStems.get(id(f), (None, None))]
             if v is not None and v > 0
         ]
         hStems = [
-            h for f in fonts
+            h
+            for f in fonts
             for _v, h in [self._fontStems.get(id(f), (None, None))]
             if h is not None and h > 0
         ]
@@ -981,10 +1008,14 @@ class DesignSpaceManager:
             print(f"MutatorScale rebuild failed: {e}")
             self._activeScaler = None
 
-    def compensatedInterpolateGlyph(self, glyphName: str,
-                                    scaleX: float, scaleY: float,
-                                    targetStemV: float = 100.0,
-                                    targetStemH: float = 50.0):
+    def compensatedInterpolateGlyph(
+        self,
+        glyphName: str,
+        scaleX: float,
+        scaleY: float,
+        targetStemV: float = 100.0,
+        targetStemH: float = 50.0,
+    ):
         """Return a normalised scaled glyph via MutatorScale stem compensation.
 
         targetStemV / targetStemH are actual stem unit values to target.
@@ -1020,16 +1051,18 @@ class DesignSpaceManager:
 
         scaler.mutatorErrors.clear()
         try:
-            scaler.set({
-                "width": scaleX / scaleY if scaleY != 0 else 1.0,
-                "targetHeight": upm * scaleY,
-                "referenceHeight": upm,
-            })
-            scaledGlyph = scaler.getScaledGlyph(
-                glyphName, (targetStemV, targetStemH)
+            scaler.set(
+                {
+                    "width": scaleX / scaleY if scaleY != 0 else 1.0,
+                    "targetHeight": upm * scaleY,
+                    "referenceHeight": upm,
+                }
             )
+            scaledGlyph = scaler.getScaledGlyph(glyphName, (targetStemV, targetStemH))
         except Exception:
-            self._lastError = f"\u2018{glyphName}\u2019 is incompatible across selected sources."
+            self._lastError = (
+                f"\u2018{glyphName}\u2019 is incompatible across selected sources."
+            )
             return None
 
         # Surface any errors the MutatorScale engine accumulated internally.
@@ -1037,7 +1070,9 @@ class DesignSpaceManager:
         # tries to access `.message` on modern exceptions, so we avoid
         # rendering the raw exception object and use a plain message instead.
         if scaler.mutatorErrors:
-            self._lastError = f"\u2018{glyphName}\u2019 is incompatible across selected sources."
+            self._lastError = (
+                f"\u2018{glyphName}\u2019 is incompatible across selected sources."
+            )
             return None
 
         if scaledGlyph is None:
@@ -1079,9 +1114,7 @@ class DesignSpaceManager:
         for source in self._dsSources:
             if not source.filename:
                 continue
-            srcPath = os.path.normpath(
-                os.path.join(self._dsDir, source.filename)
-            )
+            srcPath = os.path.normpath(os.path.join(self._dsDir, source.filename))
             if srcPath == fontPath:
                 loc = source.location or {}
                 for axis in self._op.doc.axes:
@@ -1113,9 +1146,7 @@ class DesignSpaceManager:
             for source in self._dsSources:
                 if not source.filename:
                     continue
-                srcPath = os.path.normpath(
-                    os.path.join(self._dsDir, source.filename)
-                )
+                srcPath = os.path.normpath(os.path.join(self._dsDir, source.filename))
                 if srcPath == fontPath:
                     # Reverse-lookup the font object by source filename
                     for font, _ in self._allFontLocs:
@@ -1141,6 +1172,7 @@ class DesignSpaceManager:
 # ---------------------------------------------------------------------------
 # Controller — TransmutorController (EZUI Panel)
 # ---------------------------------------------------------------------------
+
 
 class TransmutorController(ezui.WindowController):
     """EZUI panel for Transmutor.
@@ -1234,7 +1266,7 @@ class TransmutorController(ezui.WindowController):
                         title="􀄬",
                         width=30,
                         editable=False,
-                    )
+                    ),
                 ],
                 items=[],
                 height=150,
@@ -1262,7 +1294,7 @@ class TransmutorController(ezui.WindowController):
 
         # Pre-populate with any open designspaces
         if AllDesignspaces is not None:
-            for ds in (AllDesignspaces() or []):
+            for ds in AllDesignspaces() or []:
                 if ds.path:
                     self.addDesignSpace(ds.path)
 
@@ -1492,6 +1524,7 @@ class TransmutorController(ezui.WindowController):
                     (loc.get(t, 0.0) - self._state.normalizedLocation.get(t, 0.0)) ** 2
                     for t in loc
                 )
+
             bestIdx = min(range(len(labels)), key=_dist)
             popup.set(bestIdx)
             self._applySubspace(bestIdx, updateBlock=False)
@@ -1614,8 +1647,11 @@ class TransmutorController(ezui.WindowController):
         ox, oy = self.offset
 
         result = self._dsManager.compensatedInterpolateGlyph(
-            self.glyphName, sx / 100.0, sy / 100.0,
-            targetStemV=stemV, targetStemH=stemH,
+            self.glyphName,
+            sx / 100.0,
+            sy / 100.0,
+            targetStemV=stemV,
+            targetStemH=stemH,
         )
         if result is None:
             self._setError(self._dsManager._lastError)
@@ -1634,19 +1670,24 @@ class TransmutorController(ezui.WindowController):
             existingIdentifiers = [c.identifier for c in blockInfo["contours"]]
 
         _removeBlockContours(g, self._state.selectedBlockID)
-        _insertTaggedContours(g, mathGlyph, BlockData(
-            blockID=self._state.selectedBlockID,
-            dsRelPath=self._dsManager.currentRelPath,
-            glyphName=self.glyphName,
-            normalizedLocation=normLoc,
-            offset=(ox, oy),
-            scalePercent=(sx, sy),
-            stemV=stemV,
-            stemH=stemH,
-            linkStems=self.linkStems,
-            enabledSources=self._enabledSourceFiles(),
-            color=existingColor,
-        ), preserveIdentifiers=existingIdentifiers)
+        _insertTaggedContours(
+            g,
+            mathGlyph,
+            BlockData(
+                blockID=self._state.selectedBlockID,
+                dsRelPath=self._dsManager.currentRelPath,
+                glyphName=self.glyphName,
+                normalizedLocation=normLoc,
+                offset=(ox, oy),
+                scalePercent=(sx, sy),
+                stemV=stemV,
+                stemH=stemH,
+                linkStems=self.linkStems,
+                enabledSources=self._enabledSourceFiles(),
+                color=existingColor,
+            ),
+            preserveIdentifiers=existingIdentifiers,
+        )
         self._requestRedraw(g)
 
     def insertNewBlock(self) -> None:
@@ -1661,8 +1702,11 @@ class TransmutorController(ezui.WindowController):
         ox, oy = self.offset
 
         result = self._dsManager.compensatedInterpolateGlyph(
-            self.glyphName, sx / 100.0, sy / 100.0,
-            targetStemV=stemV, targetStemH=stemH,
+            self.glyphName,
+            sx / 100.0,
+            sy / 100.0,
+            targetStemV=stemV,
+            targetStemH=stemH,
         )
         if result is None:
             self._setError(self._dsManager._lastError)
@@ -1673,8 +1717,10 @@ class TransmutorController(ezui.WindowController):
         # Bake the MutatorScale natural position into the stored offset so
         # the block appears at its natural location.  The user's panel offset
         # (ox, oy) is added on top (typically 0, 0 for a brand-new block).
-        absoluteOffset = (int(round(baseOffset[0] + ox)),
-                          int(round(baseOffset[1] + oy)))
+        absoluteOffset = (
+            int(round(baseOffset[0] + ox)),
+            int(round(baseOffset[1] + oy)),
+        )
 
         g.prepareUndo("Insert Block")
         blockData = BlockData(
@@ -1741,7 +1787,8 @@ class TransmutorController(ezui.WindowController):
         self._syncAxisSliders()
         self._refreshSubspacePopup()
 
-        self._state.setState(self,
+        self._state.setState(
+            self,
             selectedBlockID=None,
             glyphName=DEFAULT_GLYPH_NAME,
             offset=(0, 0),
@@ -1772,8 +1819,10 @@ class TransmutorController(ezui.WindowController):
                     (loc.get(t, 0.0) - data.normalizedLocation.get(t, 0.0)) ** 2
                     for t in loc
                 )
-            bestIdx = min(range(len(subspaceLocs)),
-                          key=lambda i: _dist(subspaceLocs[i]))
+
+            bestIdx = min(
+                range(len(subspaceLocs)), key=lambda i: _dist(subspaceLocs[i])
+            )
             self.w.getItem("subspacePopupButton").set(bestIdx)
             self._applySubspace(bestIdx, updateBlock=False)
 
@@ -1785,14 +1834,14 @@ class TransmutorController(ezui.WindowController):
                 rows = self._dsManager.allSourceRows(fontIdSet)
                 self.w.getItem("sourceFontTable").set(rows)
                 fonts = [
-                    f for f, _ in self._dsManager._allFontLocs
-                    if id(f) in fontIdSet
+                    f for f, _ in self._dsManager._allFontLocs if id(f) in fontIdSet
                 ]
                 self._dsManager.rebuildScalerFromFonts(fonts)
                 self._updateStemSliderRanges()
 
         # Single setState push writes all widgets at once
-        self._state.setState(self,
+        self._state.setState(
+            self,
             selectedBlockID=data.blockID,
             glyphName=data.glyphName,
             normalizedLocation=data.normalizedLocation,
@@ -1932,6 +1981,7 @@ class TransmutorController(ezui.WindowController):
 # Tool — TransmutorTool (BaseEventTool)
 # ---------------------------------------------------------------------------
 
+
 class TransmutorTool(BaseEventTool):
     """Glyph view event tool that drives the TransmutorController panel.
 
@@ -1987,8 +2037,7 @@ class TransmutorTool(BaseEventTool):
             self._registerGlyphDesignSpaces(g)
             self.drawBlocks(g)
         else:
-            self.extensionContainer(
-                _MERZ_BG_ID, location="background", clear=True)
+            self.extensionContainer(_MERZ_BG_ID, location="background", clear=True)
 
     def _registerGlyphDesignSpaces(self, glyph) -> None:
         """Ensure all DS paths referenced by glyph blocks are in the popup."""
@@ -1998,8 +2047,7 @@ class TransmutorTool(BaseEventTool):
         for info in _getBlocksFromGlyph(glyph).values():
             dsRelPath = info["data"].dsRelPath
             if dsRelPath:
-                dsAbsPath = os.path.normpath(
-                    os.path.join(SCRIPT_DIR, dsRelPath))
+                dsAbsPath = os.path.normpath(os.path.join(SCRIPT_DIR, dsRelPath))
                 self._controller.addDesignSpace(dsAbsPath)
 
     # -----------------------------------------------------------------------
@@ -2235,10 +2283,12 @@ class TransmutorTool(BaseEventTool):
 
         distH0 = hx - ax
         distV0 = hy - ay
-        factor_H = ((point.x - ax) /
-                    distH0) if (info["scaleH"] and distH0 != 0) else 1.0
-        factor_V = ((point.y - ay) /
-                    distV0) if (info["scaleV"] and distV0 != 0) else 1.0
+        factor_H = (
+            ((point.x - ax) / distH0) if (info["scaleH"] and distH0 != 0) else 1.0
+        )
+        factor_V = (
+            ((point.y - ay) / distV0) if (info["scaleV"] and distV0 != 0) else 1.0
+        )
 
         # Shift constrains proportional scaling on corner handles
         if self.shiftDown and info["scaleH"] and info["scaleV"]:
@@ -2251,17 +2301,17 @@ class TransmutorTool(BaseEventTool):
         newScaleY = max(1.0, min(200.0, sy0 * factor_V))
 
         # Keep the anchor pinned: newOffset = anchor*(1 - factor) + oldOffset*factor
-        newDx = ax * (1.0 - factor_H) + dx0 * \
-            factor_H if info["scaleH"] else dx0
-        newDy = ay * (1.0 - factor_V) + dy0 * \
-            factor_V if info["scaleV"] else dy0
+        newDx = ax * (1.0 - factor_H) + dx0 * factor_H if info["scaleH"] else dx0
+        newDy = ay * (1.0 - factor_V) + dy0 * factor_V if info["scaleV"] else dy0
 
         self._controller.scalePercent = (newScaleX, newScaleY)
         # Sync lock-scale checkbox: locked only when dragging a corner handle
         # with Shift held AND the scales were already equal at drag start.
         # If the block started non-square, or an edge handle is used, uncheck.
         isCorner = info["scaleH"] and info["scaleV"]
-        self._controller.lockScale = isCorner and self.shiftDown and self._drag.scalingStartScalesEqual
+        self._controller.lockScale = (
+            isCorner and self.shiftDown and self._drag.scalingStartScalesEqual
+        )
         # Store precise floats so rounding doesn't accumulate across frames
         self._controller.offset = (f"{newDx:.4f}", f"{newDy:.4f}")
         self._controller.updateSelectedBlock()
