@@ -1,3 +1,26 @@
+############################################################
+#                                                          #
+#            OOOOO  HH   HH    NN   NN  OOOOO              #
+#           OO   OO HH   HH    NNN  NN OO   OO             #
+#           OO   OO HHHHHHH    NN N NN OO   OO             #
+#           OO   OO HH   HH    NN  NNN OO   OO             #
+#            OOOO0  HH   HH    NN   NN  OOOO0              #
+#                                                          #
+#    TTTTTTT YY   YY PPPPPP  EEEEEEE     CCCCC   OOOOO     #
+#      TTT   YY   YY PP   PP EE         CC    C OO   OO    #
+#      TTT    YYYYY  PPPPPP  EEEEE      CC      OO   OO    #
+#      TTT     YYY   PP      EE         CC    C OO   OO    #
+#      TTT     YYY   PP      EEEEEEE     CCCCC   OOOO0     #
+#                                                          #
+############################################################
+#                                                          #
+#         By Colin M. Ford and OH no Type Co, 2026         #
+#     See license file for use and distribution terms.     #
+#                                                          #
+#  Huge thanks to Loïc Sander for MutatorScale/ScaleFast   #
+#                                                          #
+############################################################
+
 """
 Transmutor
 ==========
@@ -272,11 +295,18 @@ class BlockData:
     def fromRawDict(
         cls, raw: dict, stemRange: tuple = (100, 100, 50, 50)
     ) -> "BlockData":
-        """Deserialize from a public.objectLibs entry.
+        """Deserialize a BlockData from a public.objectLibs entry.
 
         Handles both current keys and legacy stemRatioV/stemRatioH and
         transform-based scale/offset written by older versions.
-        stemRange is only needed for the legacy stemRatio conversion.
+
+        Args:
+            raw: Flat dict read from public.objectLibs[contourIdentifier].
+            stemRange: (minV, maxV, minH, maxH) from the active DS; only
+                required for legacy stemRatio-to-absolute conversion.
+
+        Returns:
+            A new BlockData instance populated from raw.
         """
         verbosePrint("BlockData::fromRawDict")
         minV, maxV, minH, maxH = stemRange
@@ -323,7 +353,12 @@ class BlockData:
         )
 
     def toRawDict(self) -> dict:
-        """Serialize to a flat dict suitable for public.objectLibs."""
+        """Serialize to a flat dict suitable for public.objectLibs.
+
+        Returns:
+            Dict of co.ohnotype.transmutor.* keys ready to store under a
+            contour identifier in glyph.lib[public.objectLibs].
+        """
         verbosePrint("BlockData::toRawDict")
         return {
             CONTOUR_SOURCE_KEY: self.dsRelPath,
@@ -346,12 +381,26 @@ class BlockData:
 
 
 def verbosePrint(s):
+    """Print s to stdout when VERBOSE is True.
+
+    Args:
+        s: The message to print.
+    """
     if VERBOSE:
         print(s)
 
 
 def _lerp(a: float, b: float, t: float) -> float:
-    """Linear interpolation: a + (b - a) * t."""
+    """Linear interpolation between two values.
+
+    Args:
+        a: Start value (t=0).
+        b: End value (t=1).
+        t: Interpolation factor.
+
+    Returns:
+        Interpolated value a + (b - a) * t.
+    """
     verbosePrint("_lerp")
     return a + (b - a) * t
 
@@ -360,6 +409,12 @@ def _handlePositions(bounds) -> list:
     """Return 8 (x, y) handle positions for the given bounding box.
 
     Order matches _HANDLE_NAMES: SW, S, SE, E, NE, N, NW, W.
+
+    Args:
+        bounds: (xMin, yMin, xMax, yMax) bounding box.
+
+    Returns:
+        List of 8 (x, y) tuples at corners and edge midpoints.
     """
     verbosePrint("_handlePositions")
     xMin, yMin, xMax, yMax = bounds
@@ -377,8 +432,16 @@ def _handlePositions(bounds) -> list:
     ]
 
 
-def _unionBounds(contours) -> tuple:
-    """Return (xMin, yMin, xMax, yMax) union of contour bounding boxes, or None."""
+def _unionBounds(contours) -> Optional[tuple]:
+    """Return the union bounding box of a list of contours.
+
+    Args:
+        contours: Iterable of fontParts contour objects with a .bounds property.
+
+    Returns:
+        (xMin, yMin, xMax, yMax) union of all contour bounding boxes, or None
+        if the list is empty or all bounds are None.
+    """
     verbosePrint("_unionBounds")
     result = None
     for contour in contours:
@@ -398,7 +461,16 @@ def _unionBounds(contours) -> tuple:
 
 
 def _pointInBounds(point, bounds) -> bool:
-    """Return True if point is inside the given bounding box."""
+    """Test whether a point lies within a bounding box.
+
+    Args:
+        point: Object with .x and .y attributes (e.g. a RoboFont mouse point).
+        bounds: (xMin, yMin, xMax, yMax) bounding box, or None.
+
+    Returns:
+        True if the point is inside bounds (inclusive), False otherwise or if
+        bounds is None.
+    """
     verbosePrint("_pointInBounds")
     if bounds is None:
         return False
@@ -411,6 +483,13 @@ def _generateBlockColor(glyph) -> list:
 
     Colors are chosen in HSV space (S=0.80, V=0.90) to stay vivid and clear.
     Hue is selected by maximising minimum circular distance from existing hues.
+
+    Args:
+        glyph: A fontParts glyph whose public.objectLibs are scanned for existing
+            block colors.
+
+    Returns:
+        [R, G, B] list of floats in [0, 1].
     """
     verbosePrint("_generateBlockColor")
     objectLibs = glyph.lib.get(OBJECT_LIBS_KEY, {})
@@ -442,9 +521,15 @@ def _userToNormalized(axis, userValue: float) -> float:
     """Convert a user-space axis value to a [0, 1] fraction of default→maximum.
 
     0.0 corresponds to axis.default, 1.0 to axis.maximum.  Values below the
-    default clamp to 0; values above the maximum clamp to 1.
+    default clamp to 0; values above the maximum clamp to 1.  Used for
+    subspace matching, not full-range normalisation.
 
-    This is used for subspace matching, not for full-range normalisation.
+    Args:
+        axis: A fontTools AxisDescriptor with .default and .maximum attributes.
+        userValue: Value in user (design) space.
+
+    Returns:
+        Normalised float in [0, 1].
     """
     verbosePrint("_userToNormalized")
     denom = axis.maximum - axis.default
@@ -459,7 +544,16 @@ def _userToNormalized(axis, userValue: float) -> float:
 
 
 def _getBlocksFromGlyph(glyph) -> dict:
-    """Return {blockID: {"contours": [...], "data": BlockData}} for tagged contours."""
+    """Extract all Transmutor blocks from a glyph's objectLibs.
+
+    Args:
+        glyph: A fontParts glyph to inspect.
+
+    Returns:
+        Dict mapping blockID (str) to {"contours": [contour, ...],
+        "data": BlockData}.  Contours are in the order they appear in the
+        glyph.  Returns an empty dict if no tagged contours are found.
+    """
     verbosePrint("_getBlocksFromGlyph")
     objectLibs = glyph.lib.get(OBJECT_LIBS_KEY, {})
     blocks = {}
@@ -477,7 +571,17 @@ def _getBlocksFromGlyph(glyph) -> dict:
 
 
 def _removeBlockContours(glyph, blockID: str) -> int:
-    """Remove contours belonging to blockID. Returns count removed."""
+    """Remove all contours tagged with blockID from a glyph.
+
+    Also cleans the matching entries from public.objectLibs.
+
+    Args:
+        glyph: A fontParts glyph to modify.
+        blockID: UUID string identifying the block to remove.
+
+    Returns:
+        Number of contours removed.
+    """
     verbosePrint("_removeBlockContours")
     objectLibs = dict(glyph.lib.get(OBJECT_LIBS_KEY, {}))
     toRemove = [
@@ -496,7 +600,11 @@ def _removeBlockContours(glyph, blockID: str) -> int:
 def _scrubOrphanedObjectLibs(glyph) -> int:
     """Remove public.objectLibs entries whose contour identifiers no longer exist.
 
-    Returns the number of stale entries removed.
+    Args:
+        glyph: A fontParts glyph whose objectLibs should be cleaned.
+
+    Returns:
+        Number of stale entries removed.
     """
     verbosePrint("_scrubOrphanedObjectLibs")
     objectLibs = glyph.lib.get(OBJECT_LIBS_KEY)
@@ -516,9 +624,14 @@ def _scrubOrphanedObjectLibs(glyph) -> int:
 def _forceContourIdentifier(glyph, contour, newId: str) -> None:
     """Transplant newId onto contour, keeping the glyph's identifier registry in sync.
 
-    fontParts exposes `identifier` as read-only once set, so we write directly
-    to the underlying DoodleContour._identifier slot and update the glyph
-    registry set (glyph.naked()._identifiers) atomically.
+    fontParts exposes ``identifier`` as read-only once set, so this writes
+    directly to the underlying DoodleContour._identifier slot and updates
+    the glyph registry set (glyph.naked()._identifiers) atomically.
+
+    Args:
+        glyph: The fontParts glyph that owns the contour.
+        contour: The fontParts contour to re-identify.
+        newId: The identifier string to assign.
     """
     verbosePrint("_forceContourIdentifier")
     naked = contour.naked()
@@ -534,19 +647,26 @@ def _forceContourIdentifier(glyph, contour, newId: str) -> None:
 
 
 def _insertTaggedContours(
-    glyph, glyphMathObj, data: "BlockData", preserveIdentifiers: list = None
+    glyph, glyphMathObj, data: "BlockData", preserveIdentifiers: Optional[list] = None
 ) -> list:
     """Draw interpolated contours into glyph, apply offset, and tag in objectLibs.
 
     If data.color is None a new color is auto-generated from existing block hues.
 
-    preserveIdentifiers: optional list of contour identifiers (one per contour
-    produced by glyphMathObj in draw order).  When provided, the newly-inserted
-    contours are given those identifiers instead of auto-generated ones, so that
-    public.objectLibs keys remain stable across re-interpolations and RoboFont
-    undo works correctly.
+    Args:
+        glyph: The fontParts glyph to draw into.
+        glyphMathObj: A MutatorMath / MutatorScale glyph object supporting
+            drawPoints() or draw().
+        data: BlockData instance describing the block's parameters and metadata.
+            data.color is set in-place if it is None.
+        preserveIdentifiers: Optional list of contour identifiers (one per
+            contour produced by glyphMathObj in draw order).  When provided,
+            newly-inserted contours keep those identifiers so that
+            public.objectLibs keys remain stable across re-interpolations and
+            RoboFont undo works correctly.
 
-    Returns list of contour identifiers (old or new).
+    Returns:
+        List of contour identifier strings (reused or newly generated).
     """
     verbosePrint("_insertTaggedContours")
     if data.color is None:
@@ -635,7 +755,7 @@ class DesignSpaceManager:
         return list(self._paths)
 
     @property
-    def currentRelPath(self) -> str:
+    def currentRelPath(self) -> Optional[str]:
         """SCRIPT_DIR-relative path of the currently loaded designspace, or None."""
         verbosePrint("DesignSpaceManager::currentRelPath")
         return self._dsRelPath
@@ -659,7 +779,16 @@ class DesignSpaceManager:
     # ---- Path management ----
 
     def registerPath(self, path: str) -> bool:
-        """Add an absolute path to the known list. Returns True if newly added."""
+        """Add a designspace path to the known list if not already present.
+
+        The path is normalised to an absolute form before storage.
+
+        Args:
+            path: Absolute or relative path to a .designspace file.
+
+        Returns:
+            True if the path was newly added; False if already registered.
+        """
         verbosePrint("DesignSpaceManager::registerPath")
         path = os.path.normpath(os.path.abspath(path))
         if path in self._paths:
@@ -668,7 +797,14 @@ class DesignSpaceManager:
         return True
 
     def indexForPath(self, path: str) -> int:
-        """Return the index of path in the known list, or -1."""
+        """Return the index of path in the known list, or -1 if not found.
+
+        Args:
+            path: Absolute or relative path to a .designspace file.
+
+        Returns:
+            Zero-based index into self.paths, or -1 if not registered.
+        """
         verbosePrint("DesignSpaceManager::indexForPath")
         path = os.path.normpath(os.path.abspath(path))
         try:
@@ -692,8 +828,14 @@ class DesignSpaceManager:
         """Load a designspace file, index fonts, and build subspace scalers.
 
         Populates font labels, stem measurements, and groups sources by
-        non-wght axis location into subspaces. Returns True on success.
-        Skips reload if the path matches the currently loaded designspace.
+        non-wght axis location into subspaces.  Skips reload if the path
+        matches the currently loaded designspace.
+
+        Args:
+            path: Absolute or relative path to a .designspace file.
+
+        Returns:
+            True on successful load; False if the file could not be parsed.
         """
         verbosePrint("DesignSpaceManager::load")
         path = os.path.normpath(os.path.abspath(path))
@@ -905,14 +1047,30 @@ class DesignSpaceManager:
         return [lbl for lbl, _nn, _fts, _st in self._subspaceScalers]
 
     def subspaceNormLoc(self, index: int) -> dict:
-        """Return the non-wght normalised location for the subspace at index."""
+        """Return the non-wght normalised location for the subspace at index.
+
+        Args:
+            index: Zero-based subspace index.
+
+        Returns:
+            Dict of {axisTag: normalizedValue} for non-wght axes.  Empty dict
+            if index is out of range.
+        """
         verbosePrint("DesignSpaceManager::subspaceNormLoc")
         if 0 <= index < len(self._subspaceScalers):
             return dict(self._subspaceScalers[index][1])
         return {}
 
     def subspaceFontIdSet(self, index: int) -> set:
-        """Return a set of id(font) values for all fonts in the subspace."""
+        """Return the set of id(font) values for all fonts in the subspace.
+
+        Args:
+            index: Zero-based subspace index.
+
+        Returns:
+            Set of id(font) integers.  Falls back to all loaded fonts when
+            index is out of range.
+        """
         verbosePrint("DesignSpaceManager::subspaceFontIdSet")
         if 0 <= index < len(self._subspaceScalers):
             _, _, fonts, _ = self._subspaceScalers[index]
@@ -920,7 +1078,15 @@ class DesignSpaceManager:
         return {id(f) for f, _ in self._allFontLocs}  # fallback: all
 
     def fontsForSubspace(self, index: int) -> list:
-        """Return the list of fonts for the subspace at index."""
+        """Return the list of font objects for the subspace at index.
+
+        Args:
+            index: Zero-based subspace index.
+
+        Returns:
+            List of defcon.Font objects.  Falls back to all loaded fonts when
+            index is out of range.
+        """
         verbosePrint("DesignSpaceManager::fontsForSubspace")
         if 0 <= index < len(self._subspaceScalers):
             return list(self._subspaceScalers[index][2])
@@ -935,7 +1101,13 @@ class DesignSpaceManager:
     def allSourceRows(self, activeFontIdSet: set) -> list:
         """Return table row dicts for every source.
 
-        activeFontIdSet: set of id(font) values that should be enabled.
+        Args:
+            activeFontIdSet: Set of id(font) values whose rows should be
+                pre-checked (selected=True).
+
+        Returns:
+            List of dicts with keys: selected (bool), name (str),
+            vStem (int or '—'), hStem (int or '—').
         """
         verbosePrint("DesignSpaceManager::allSourceRows")
         rows = []
@@ -952,7 +1124,15 @@ class DesignSpaceManager:
         return rows
 
     def fontsFromTableItems(self, items: list) -> list:
-        """Return the font objects whose table rows are enabled."""
+        """Return the font objects whose table rows are currently enabled.
+
+        Args:
+            items: List of row dicts as returned by the EZUI sourceFontTable
+                (each with a 'selected' bool key).
+
+        Returns:
+            List of defcon.Font objects for rows where selected is True.
+        """
         verbosePrint("DesignSpaceManager::fontsFromTableItems")
         return [
             font
@@ -961,7 +1141,15 @@ class DesignSpaceManager:
         ]
 
     def enabledSourceFiles(self, items: list) -> list:
-        """Return DS-relative filenames for the enabled rows in the source table."""
+        """Return DS-relative filenames for enabled rows in the source table.
+
+        Args:
+            items: List of row dicts as returned by the EZUI sourceFontTable.
+
+        Returns:
+            List of DS-relative filename strings (e.g. 'sources/Light.ufo')
+            for rows where selected is True and a source filename is known.
+        """
         verbosePrint("DesignSpaceManager::enabledSourceFiles")
         result = []
         for (font, _), item in zip(self._allFontLocs, items):
@@ -972,7 +1160,14 @@ class DesignSpaceManager:
         return result
 
     def sourceFilesFontIdSet(self, filenames: list) -> set:
-        """Return a set of id(font) values whose source filenames are in the list."""
+        """Return id(font) values whose DS-relative source filenames are in the list.
+
+        Args:
+            filenames: List of DS-relative source filenames to match against.
+
+        Returns:
+            Set of id(font) integers for matching source fonts.
+        """
         verbosePrint("DesignSpaceManager::sourceFilesFontIdSet")
         fnSet = set(filenames)
         return {
@@ -982,10 +1177,17 @@ class DesignSpaceManager:
         }
 
     def _stemRangeForFonts(self, fonts: list) -> tuple:
-        """Return (minV, maxV, minH, maxH) stem range for the given fonts.
+        """Return the stem range across a set of source fonts.
 
-        Filters out None / zero measurements.  Falls back to (100, 100, 50, 50)
+        Filters out None and zero measurements.  Falls back to (100, 100, 50, 50)
         when no valid measurements exist.
+
+        Args:
+            fonts: List of defcon.Font objects to measure.
+
+        Returns:
+            (minV, maxV, minH, maxH) where V is vertical-stroke (measured
+            horizontally) and H is horizontal-stroke (measured vertically).
         """
         verbosePrint("DesignSpaceManager::_stemRangeForFonts")
         vStems = [
@@ -1008,7 +1210,14 @@ class DesignSpaceManager:
         )
 
     def rebuildScalerFromFonts(self, fonts: list) -> None:
-        """Rebuild _activeScaler and _activeStemRange from the enabled fonts."""
+        """Rebuild the active MutatorScaleEngine and stem range from a font list.
+
+        Sets _activeScaler to None and logs a warning if fewer than 2 fonts
+        are provided or if MutatorScaleEngine construction fails.
+
+        Args:
+            fonts: List of defcon.Font objects to use as interpolation sources.
+        """
         verbosePrint("DesignSpaceManager::rebuildScalerFromFonts")
         if len(fonts) < 2:
             self._activeScaler = None
@@ -1027,23 +1236,27 @@ class DesignSpaceManager:
         scaleY: float,
         targetStemV: float = 100.0,
         targetStemH: float = 50.0,
-    ):
-        """Return a normalised scaled glyph via MutatorScale stem compensation.
+    ) -> Optional[tuple]:
+        """Interpolate and scale a glyph with MutatorScale stem compensation.
 
-        targetStemV / targetStemH are actual stem unit values to target.
+        The active MutatorScaleEngine interpolates between sources to match the
+        target stem thickness at the requested scale.  The result is shifted so
+        its SW bounding-box corner sits at (0, 0).
 
-        The active MutatorScaleEngine (set by subspace / source-table checkboxes)
-        interpolates between its sources to match the target stem thickness at
-        the requested scale.
+        On failure the reason is written to self._lastError and None is returned.
 
-        The returned glyph is shifted so its SW bounding-box corner sits at
-        (0, 0).  The original SW position is returned as *baseOffset* so the
-        caller can place the glyph at an absolute position in the host glyph.
+        Args:
+            glyphName: Name of the glyph to interpolate.
+            scaleX: Horizontal scale factor (1.0 = 100%).
+            scaleY: Vertical scale factor (1.0 = 100%).
+            targetStemV: Target vertical-stroke stem width in font units.
+            targetStemH: Target horizontal-stroke stem width in font units.
 
-        Returns (scaledGlyph, baseOffset) or None when the scaler is
-        unavailable or the glyph cannot be found.  *baseOffset* is an
-        (x, y) tuple representing the glyph's natural SW position before
-        normalisation.
+        Returns:
+            (scaledGlyph, baseOffset) on success, where scaledGlyph is a
+            MutatorMath glyph object normalised to (0, 0), and baseOffset is
+            an (x, y) tuple of the original SW position.  Returns None when
+            the scaler is unavailable or the glyph cannot be interpolated.
         """
         self._lastError = ""
         verbosePrint("DesignSpaceManager::compensatedInterpolateGlyph")
@@ -1105,12 +1318,20 @@ class DesignSpaceManager:
             baseOffset = (0, 0)
         return scaledGlyph, baseOffset
 
-    def defaultNormalizedLocation(self, fontPath: str = None) -> dict:
-        """Return the ideal default normalised location for the given font.
+    def defaultNormalizedLocation(self, fontPath: Optional[str] = None) -> dict:
+        """Return the ideal default normalised axis location for the given font.
 
-        All axes are set to their normalised default (0.0).  If fontPath matches
-        a source in the loaded designspace, that source's axis position is used
+        All axes default to 0.0 (normalised default).  If fontPath matches a
+        source in the loaded designspace, that source's axis position is used
         instead, so opening a condensed font pre-selects the condensed subspace.
+
+        Args:
+            fontPath: Absolute path to an open UFO, or None to get the pure
+                axis-default location.
+
+        Returns:
+            Dict of {axisTag: normalizedValue} for all axes in the loaded DS.
+            Returns {"wght": 0.0} if no DS is loaded.
         """
         verbosePrint("DesignSpaceManager::defaultNormalizedLocation")
         if not self.isLoaded:
@@ -1139,13 +1360,20 @@ class DesignSpaceManager:
 
         return result
 
-    def defaultStemValues(self, fontPath: str = None) -> tuple:
-        """Return (stemV, stemH) for the source matching fontPath.
+    def defaultStemValues(self, fontPath: Optional[str] = None) -> tuple:
+        """Return (stemV, stemH) for the source that best matches fontPath.
 
         Lookup order:
-        1. The source whose path matches fontPath exactly.
-        2. The default font in the designspace (wght axis default).
-        3. The minimum values from the active stem range.
+        1. Source whose path matches fontPath exactly.
+        2. Default font in the designspace (wght axis default).
+        3. Minimum values from the active stem range.
+
+        Args:
+            fontPath: Absolute path to a UFO to match against, or None.
+
+        Returns:
+            (stemV, stemH) float tuple.  Falls back to (100, 50) if no DS
+            is loaded.
         """
         verbosePrint("DesignSpaceManager::defaultStemValues")
         if not self.isLoaded:
@@ -1195,6 +1423,13 @@ class TransmutorController(ezui.WindowController):
     """
 
     def build(self):
+        """Construct the EZUI panel and populate initial state.
+
+        Called once by EZUI before started().  Initialises the DesignSpaceManager,
+        builds all panel widgets, then attempts to pre-load a designspace in this
+        priority order: open DesignSpaceEditor document, font lib cache, first
+        registered path.
+        """
         verbosePrint("TransmutorController::build")
         self._dsManager = DesignSpaceManager()
         self._tool = None
@@ -1341,6 +1576,7 @@ class TransmutorController(ezui.WindowController):
             self.w.getItem("scaleXSlider").enable(False)
 
     def started(self):
+        """Open the panel window. Called by EZUI after build() completes."""
         verbosePrint("TransmutorController::started")
         self.w.open()
 
@@ -1349,7 +1585,11 @@ class TransmutorController(ezui.WindowController):
     # -----------------------------------------------------------------------
 
     def setTool(self, tool) -> None:
-        """Register the active TransmutorTool for Merz redraw callbacks."""
+        """Register the active TransmutorTool for Merz redraw callbacks.
+
+        Args:
+            tool: A TransmutorTool instance, or None to deregister.
+        """
         verbosePrint("TransmutorController::setTool")
         self._tool = tool
 
@@ -1469,7 +1709,11 @@ class TransmutorController(ezui.WindowController):
     # -----------------------------------------------------------------------
 
     def addDesignSpace(self, path: str) -> None:
-        """Register a designspace path and refresh the popup."""
+        """Register a designspace path and refresh the popup menu.
+
+        Args:
+            path: Absolute path to a .designspace file.
+        """
         verbosePrint("TransmutorController::addDesignSpace")
         self._dsManager.registerPath(path)
         self._refreshPopup()
@@ -1477,10 +1721,15 @@ class TransmutorController(ezui.WindowController):
     def loadDesignSpace(self, path: str, updateBlock: bool = True) -> None:
         """Load a designspace and sync the popup selection and axis sliders.
 
-        Pass updateBlock=False when the caller will set up state (normalised
-        location, stems, etc.) itself before calling updateSelectedBlock —
-        this prevents a flash where the block is briefly drawn with the wrong
-        (default) subspace before the correct state is applied.
+        Also persists the path to the current font's lib for automatic
+        restoration on next launch.
+
+        Args:
+            path: Absolute path to a .designspace file.
+            updateBlock: If True (default), calls updateSelectedBlock() after
+                loading.  Pass False when the caller will set up state
+                (normalised location, stems, etc.) itself to avoid drawing
+                the block with the wrong default subspace prematurely.
         """
         verbosePrint("TransmutorController::loadDesignSpace")
         path = os.path.normpath(os.path.abspath(path))
@@ -1504,6 +1753,9 @@ class TransmutorController(ezui.WindowController):
 
         Fonts in the chosen subspace are pre-enabled; all others are disabled.
         When no subspaces exist (wght-only DS) every font is enabled.
+
+        Args:
+            subspaceIdx: Zero-based index of the newly selected subspace.
         """
         verbosePrint("TransmutorController::_refreshSourceTable")
         labels = self._dsManager.subspaceLabels()
@@ -1552,6 +1804,11 @@ class TransmutorController(ezui.WindowController):
 
         Preserves the current wght value so the weight slider position is
         unaffected when the user just switches subspace.
+
+        Args:
+            index: Zero-based subspace index to apply.
+            updateBlock: If True (default), redraws the selected block after
+                the subspace change.
         """
         verbosePrint("TransmutorController::_applySubspace")
         nonWghtLoc = self._dsManager.subspaceNormLoc(index)
@@ -1606,7 +1863,7 @@ class TransmutorController(ezui.WindowController):
             item.setMaxValue(extHi)
             item.set(max(extLo, min(extHi, cur)))
 
-    def _currentFontPath(self) -> str:
+    def _currentFontPath(self) -> Optional[str]:
         """Return the path of the current font, or None."""
         verbosePrint("TransmutorController::_currentFontPath")
         try:
@@ -1622,8 +1879,13 @@ class TransmutorController(ezui.WindowController):
         items += [NSMenuItem.separatorItem(), "Choose a Designspace ..."]
         self.w.getItem("designspacePopupButton").setItems(items)
 
-    def _openDesignSpace(self, path: str = None) -> None:
-        """Prompt for a DS file if no path given, then register and load."""
+    def _openDesignSpace(self, path: Optional[str] = None) -> None:
+        """Register and load a designspace, prompting for a file if path is None.
+
+        Args:
+            path: Absolute path to a .designspace file, or None to open a
+                system file-picker dialog.
+        """
         verbosePrint("TransmutorController::_openDesignSpace")
         if not path:
             path = GetFile(
@@ -1784,7 +2046,12 @@ class TransmutorController(ezui.WindowController):
         self.w.getItem("errorLabel").set("\u00a0")
 
     def _setError(self, message: str) -> None:
-        """Show *message* in the footnote label; clear it when message is empty."""
+        """Show an error message in the footnote label under the glyph name field.
+
+        Args:
+            message: Error text to display.  Passing an empty string clears
+                the label (equivalent to calling _clearError).
+        """
         self.w.getItem("errorLabel").set(message if message else "\u00a0")
 
     def setDefaults(self) -> None:
@@ -1808,7 +2075,15 @@ class TransmutorController(ezui.WindowController):
         )
 
     def selectBlock(self, data: "BlockData") -> None:
-        """Populate all controls from a block's data and switch DS."""
+        """Populate all panel controls from a block's stored data.
+
+        Switches the active designspace if the block references a different
+        one, restores the subspace and enabled sources, then pushes all
+        parameters to the panel widgets and triggers a redraw.
+
+        Args:
+            data: BlockData instance read from the selected block's objectLib.
+        """
         verbosePrint("TransmutorController::selectBlock")
 
         # Switch designspace to match the block (suppress the premature
@@ -1880,7 +2155,13 @@ class TransmutorController(ezui.WindowController):
     # -----------------------------------------------------------------------
 
     def _requestRedraw(self, glyph) -> None:
-        """Ask the registered tool to refresh Merz layers."""
+        """Ask the registered tool to refresh Merz layers for the given glyph.
+
+        No-ops if no tool is registered.
+
+        Args:
+            glyph: The fontParts glyph whose blocks and handles should be redrawn.
+        """
         verbosePrint("TransmutorController::_requestRedraw")
         if self._tool is not None:
             self._tool.drawBlocks(glyph)
@@ -1891,7 +2172,14 @@ class TransmutorController(ezui.WindowController):
     # -----------------------------------------------------------------------
 
     def designspacePopupButtonCallback(self, sender):
-        """Respond to popup selection: open file picker or switch DS."""
+        """Respond to designspace popup selection.
+
+        Opens a file picker when 'Choose a Designspace ...' is selected;
+        otherwise loads the designspace at the chosen index.
+
+        Args:
+            sender: The EZUI popup button that triggered the callback.
+        """
         verbosePrint("TransmutorController::designspacePopupButtonCallback")
         if sender.getItem() == "Choose a Designspace ...":
             self._openDesignSpace()
@@ -1902,12 +2190,22 @@ class TransmutorController(ezui.WindowController):
                 self.loadDesignSpace(paths[idx])
 
     def subspacePopupButtonCallback(self, sender):
-        """Respond to subspace selection: update the non-wght axes of _normLoc."""
+        """Respond to subspace popup selection.
+
+        Updates the non-wght axes of _normLoc and rebuilds the source table.
+
+        Args:
+            sender: The EZUI popup button that triggered the callback.
+        """
         verbosePrint("TransmutorController::subspacePopupButtonCallback")
         self._applySubspace(sender.get())
 
     def sourceFontTableEditCallback(self, sender):
-        """Rebuild the active scaler when the user toggles source checkboxes."""
+        """Rebuild the active scaler when the user toggles source checkboxes.
+
+        Args:
+            sender: The EZUI table that triggered the callback.
+        """
         verbosePrint("TransmutorController::sourceFontTableEditCallback")
         items = sender.get()
         fonts = self._dsManager.fontsFromTableItems(items)
@@ -1918,7 +2216,10 @@ class TransmutorController(ezui.WindowController):
     def sourceFontTableDoubleClickCallback(self, sender):
         """Set stem sliders to the double-clicked row's stem values.
 
-        Does nothing if the row does not have numeric stems (shown as '—').
+        Does nothing if the row's vStem/hStem are not numeric (shown as '—').
+
+        Args:
+            sender: The EZUI table that triggered the callback.
         """
         verbosePrint("TransmutorController::sourceFontTableDoubleClickCallback")
         selection = sender.getSelectedIndexes()
@@ -1933,16 +2234,31 @@ class TransmutorController(ezui.WindowController):
         self.updateSelectedBlock()
 
     def glyphNameFieldCallback(self, sender):
+        """Update the target glyph name and re-interpolate the selected block.
+
+        Args:
+            sender: The EZUI text field that triggered the callback.
+        """
         verbosePrint("TransmutorController::glyphNameFieldCallback")
         self._state.glyphName = sender.get().strip()
         self.updateSelectedBlock()
 
     def scaleXSliderCallback(self, sender):
+        """Update the horizontal scale percentage and redraw.
+
+        Args:
+            sender: The EZUI slider that triggered the callback.
+        """
         verbosePrint("TransmutorController::scaleXSliderCallback")
         self._state.scalePercent = (sender.get(), self._state.scalePercent[1])
         self.updateSelectedBlock()
 
     def scaleYSliderCallback(self, sender):
+        """Update the vertical scale percentage (and mirror to X when locked) and redraw.
+
+        Args:
+            sender: The EZUI slider that triggered the callback.
+        """
         verbosePrint("TransmutorController::scaleYSliderCallback")
         sy = sender.get()
         if self._state.lockScale:
@@ -1954,6 +2270,13 @@ class TransmutorController(ezui.WindowController):
         self.updateSelectedBlock()
 
     def lockScaleCheckboxCallback(self, sender):
+        """Toggle proportional-scale lock and sync sliders.
+
+        When checked, X is mirrored to Y's current value.
+
+        Args:
+            sender: The EZUI checkbox that triggered the callback.
+        """
         verbosePrint("TransmutorController::lockScaleCheckboxCallback")
         locked = bool(sender.get())
         self._state.lockScale = locked
@@ -1965,6 +2288,11 @@ class TransmutorController(ezui.WindowController):
         self.updateSelectedBlock()
 
     def stemVSliderCallback(self, sender):
+        """Update the V stem value (and mirror H when linked) and redraw.
+
+        Args:
+            sender: The EZUI slider that triggered the callback.
+        """
         verbosePrint("TransmutorController::stemVSliderCallback")
         v = sender.get()
         if self._state.linkStems:
@@ -1979,11 +2307,21 @@ class TransmutorController(ezui.WindowController):
         self.updateSelectedBlock()
 
     def stemHSliderCallback(self, sender):
+        """Update the H stem value and redraw.
+
+        Args:
+            sender: The EZUI slider that triggered the callback.
+        """
         verbosePrint("TransmutorController::stemHSliderCallback")
         self._state.stemValues = (self._state.stemValues[0], sender.get())
         self.updateSelectedBlock()
 
     def linkStemsCheckboxCallback(self, sender):
+        """Toggle the V/H stem link and sync H to V's normalised position when checked.
+
+        Args:
+            sender: The EZUI checkbox that triggered the callback.
+        """
         verbosePrint("TransmutorController::linkStemsCheckboxCallback")
         linked = bool(sender.get())
         self._state.linkStems = linked
@@ -1999,10 +2337,20 @@ class TransmutorController(ezui.WindowController):
         self.updateSelectedBlock()
 
     def insertButtonCallback(self, sender):
+        """Insert a new block with the current panel settings.
+
+        Args:
+            sender: The EZUI button that triggered the callback.
+        """
         verbosePrint("TransmutorController::insertButtonCallback")
         self.insertNewBlock()
 
     def removeButtonCallback(self, sender):
+        """Remove the currently selected block.
+
+        Args:
+            sender: The EZUI button that triggered the callback.
+        """
         verbosePrint("TransmutorController::removeButtonCallback")
         self.removeSelectedBlock()
 
@@ -2023,6 +2371,11 @@ class TransmutorTool(BaseEventTool):
     _drag = DragState()
 
     def getToolbarTip(self) -> str:
+        """Return the tooltip string shown in the RoboFont toolbar.
+
+        Returns:
+            The string 'Transmutor'.
+        """
         verbosePrint("TransmutorTool::getToolbarTip")
         return "Transmutor"
 
@@ -2100,7 +2453,13 @@ class TransmutorTool(BaseEventTool):
     # -----------------------------------------------------------------------
 
     def drawBlocks(self, glyph) -> None:
-        """Repaint background outlines for every block."""
+        """Repaint the background Merz outlines for every block in the glyph.
+
+        Clears and fully redraws the background container.
+
+        Args:
+            glyph: The fontParts glyph whose blocks should be drawn.
+        """
         verbosePrint("TransmutorTool::drawBlocks")
         container = self.extensionContainer(
             _MERZ_BG_ID, location="background", clear=True
@@ -2120,7 +2479,15 @@ class TransmutorTool(BaseEventTool):
                 contour.draw(pen)
 
     def drawHandles(self, glyph, blockID: str) -> None:
-        """Draw a dashed selection box and 8 handles for the given block."""
+        """Draw a dashed selection box and 8 scale handles for a block.
+
+        Clears and fully redraws the foreground handle container.  Does
+        nothing if glyph or blockID is None, or if the block has no bounds.
+
+        Args:
+            glyph: The fontParts glyph that contains the block.
+            blockID: UUID string of the block to draw handles for.
+        """
         verbosePrint("TransmutorTool::drawHandles")
         container = self.extensionContainer(
             _MERZ_FG_ID, location="foreground", clear=True
@@ -2176,11 +2543,19 @@ class TransmutorTool(BaseEventTool):
     # Hit testing
     # -----------------------------------------------------------------------
 
-    def _hitTestHandles(self, point, glyph, blockID) -> str | None:
-        """Return compass name of the handle at point, or None.
+    def _hitTestHandles(self, point, glyph, blockID) -> Optional[str]:
+        """Return the compass name of whichever handle is hit at point, or None.
 
-        Hit radius is HANDLE_SIZE screen-pixels converted to glyph units
-        via the current view scale.
+        Hit radius is HANDLE_SIZE screen pixels converted to glyph units via
+        the current glyph view scale.
+
+        Args:
+            point: Mouse point with .x and .y in glyph-space coordinates.
+            glyph: The fontParts glyph that contains the block.
+            blockID: UUID string of the selected block to hit-test.
+
+        Returns:
+            A compass name string (e.g. 'NE', 'W') on hit, or None on miss.
         """
         verbosePrint("TransmutorTool::_hitTestHandles")
         if glyph is None or blockID is None:
@@ -2201,8 +2576,16 @@ class TransmutorTool(BaseEventTool):
                 return name
         return None
 
-    def _hitTestBlocks(self, point, glyph):
-        """Return (blockID, BlockData) for the first block hit, or None."""
+    def _hitTestBlocks(self, point, glyph) -> Optional[tuple]:
+        """Return the first block whose bounding box contains point.
+
+        Args:
+            point: Mouse point with .x and .y in glyph-space coordinates.
+            glyph: The fontParts glyph to test.
+
+        Returns:
+            (blockID, BlockData) for the first hit block, or None on miss.
+        """
         verbosePrint("TransmutorTool::_hitTestBlocks")
         for blockID, info in _getBlocksFromGlyph(glyph).items():
             bounds = _unionBounds(info["contours"])
@@ -2215,7 +2598,17 @@ class TransmutorTool(BaseEventTool):
     # -----------------------------------------------------------------------
 
     def mouseDown(self, point, clickCount: int) -> None:
-        """Hit-test handles, then blocks, then deselect on miss."""
+        """Hit-test handles, then blocks, then deselect on miss.
+
+        Priority order: (1) scale handle on selected block, (2) block body
+        hit (option-down starts a stem drag, otherwise an offset drag),
+        (3) miss deselects current block; double-click on empty space inserts
+        a new block.
+
+        Args:
+            point: Mouse point in glyph-space coordinates.
+            clickCount: Number of rapid successive clicks (1 = single, 2 = double).
+        """
         verbosePrint("TransmutorTool::mouseDown")
         if self._controller is None:
             return
@@ -2251,7 +2644,16 @@ class TransmutorTool(BaseEventTool):
             self._controller.insertNewBlock()
 
     def _beginScaleDrag(self, handleName: str, glyph, blockID: str) -> None:
-        """Capture all state needed for a handle-scaling drag."""
+        """Capture all state needed to begin a handle-scaling drag.
+
+        Calls glyph.prepareUndo and populates the DragState with anchor,
+        handle position, start scale, start offset, and start stem values.
+
+        Args:
+            handleName: Compass name of the hit handle (e.g. 'NE').
+            glyph: The fontParts glyph being scaled.
+            blockID: UUID string of the block being scaled.
+        """
         verbosePrint("TransmutorTool::_beginScaleDrag")
         glyph.prepareUndo("Scale Block")
         info = _HANDLE_SCALING_INFO[handleName]
@@ -2277,7 +2679,15 @@ class TransmutorTool(BaseEventTool):
         )
 
     def _beginOffsetDrag(self, point, glyph) -> None:
-        """Capture state for a block-body offset drag."""
+        """Capture state to begin a block-body offset drag.
+
+        Calls glyph.prepareUndo and stores the drag start point and current
+        offset into DragState.
+
+        Args:
+            point: Mouse down point in glyph-space coordinates.
+            glyph: The fontParts glyph being moved.
+        """
         verbosePrint("TransmutorTool::_beginOffsetDrag")
         glyph.prepareUndo("Move Block")
         ox, oy = self._controller.offset
@@ -2288,11 +2698,15 @@ class TransmutorTool(BaseEventTool):
         )
 
     def _beginStemDrag(self, point) -> None:
-        """Capture state for an option-drag stem-control operation.
+        """Capture state to begin an option-drag stem-adjustment operation.
 
-        Without Shift: horizontal movement controls both V and H stems
-        proportionally (isotropic). With Shift: X → H stem, Y → V stem
-        independently (anisotropic).
+        Without Shift: horizontal movement drives V stem; H mirrors
+        proportionally (isotropic).  With Shift: X → V stem, Y → H stem
+        independently (anisotropic).  Calls glyph.prepareUndo if a current
+        glyph is open.
+
+        Args:
+            point: Mouse down point in glyph-space coordinates.
         """
         verbosePrint("TransmutorTool::_beginStemDrag")
         g = CurrentGlyph()
@@ -2307,7 +2721,13 @@ class TransmutorTool(BaseEventTool):
         )
 
     def mouseDragged(self, point, delta) -> None:
-        """Route to scale, stem, or offset drag handler."""
+        """Route the drag event to the appropriate handler.
+
+        Args:
+            point: Current mouse point in glyph-space coordinates.
+            delta: Movement since last event (unused; calculation done from
+                stored drag-start point for accuracy).
+        """
         verbosePrint("TransmutorTool::mouseDragged")
         if self._controller is None:
             return
@@ -2320,7 +2740,14 @@ class TransmutorTool(BaseEventTool):
             self._handleOffsetDrag(point)
 
     def _handleScaleDrag(self, point) -> None:
-        """Compute new scale + offset from handle drag and push to controller."""
+        """Compute new scale and offset from a handle drag and push to controller.
+
+        Shift constrains proportional scaling on corner handles.  Option held
+        scales stems with the block; releasing Option restores original stems.
+
+        Args:
+            point: Current mouse point in glyph-space coordinates.
+        """
         verbosePrint("TransmutorTool::_handleScaleDrag")
         info = _HANDLE_SCALING_INFO[self._drag.scalingHandle]
         ax, ay = self._drag.scalingAnchor
@@ -2388,11 +2815,14 @@ class TransmutorTool(BaseEventTool):
         self._controller.updateSelectedBlock()
 
     def _handleStemDrag(self, point) -> None:
-        """Adjust stem sliders based on mouse delta from drag start.
+        """Adjust stem sliders based on mouse delta from the drag start point.
 
         Without Shift (isotropic): horizontal distance drives V stem; H stem
         mirrors V at the same normalised position within its own range.
         With Shift (anisotropic): X → V stem, Y → H stem independently.
+
+        Args:
+            point: Current mouse point in glyph-space coordinates.
         """
         verbosePrint("TransmutorTool::_handleStemDrag")
         if self._drag.stemDragStartPoint is None:
@@ -2420,7 +2850,13 @@ class TransmutorTool(BaseEventTool):
         self._controller.updateSelectedBlock()
 
     def _handleOffsetDrag(self, point) -> None:
-        """Compute new offset from body drag and push to controller."""
+        """Compute a new block offset from a body drag and push to controller.
+
+        Shift constrains movement to 45° increments.
+
+        Args:
+            point: Current mouse point in glyph-space coordinates.
+        """
         verbosePrint("TransmutorTool::_handleOffsetDrag")
         if self._drag.dragStartPoint is None or self._drag.dragStartOffset is None:
             return
@@ -2441,7 +2877,11 @@ class TransmutorTool(BaseEventTool):
         self._controller.updateSelectedBlock()
 
     def mouseUp(self, point) -> None:
-        """End any active drag, snapping float values to integers."""
+        """End any active drag, snapping floats to integers and committing undo.
+
+        Args:
+            point: Mouse release point in glyph-space coordinates (unused).
+        """
         verbosePrint("TransmutorTool::mouseUp")
         wasScaling = self._drag.scalingHandle is not None
         wasDragging = self._drag.dragging
@@ -2458,16 +2898,16 @@ class TransmutorTool(BaseEventTool):
     def keyDown(self, event) -> None:
         """Handle keyboard shortcuts for the selected block.
 
-        - Backspace / Delete: remove block.
-        - Arrow keys: nudge block offset.
-            No modifier    → 1 unit
-            Shift          → glyphViewShiftIncrement (default 10)
-            Cmd+Shift      → glyphViewCommandShiftIncrement (default 100)
-        - Option + arrow keys: adjust stem weights (no block movement).
-            Left / Right: isotropic (V drives H via norm formula) when
-            linkStems is True; V-only when linkStems is False.
-            Up / Down: H only, unchecks linkStems.
-            Shift multiplies the increment from 1 to 10.
+        Backspace/Delete removes the block.  Arrow keys nudge the offset:
+        no modifier = 1 unit, Shift = glyphViewShiftIncrement (default 10),
+        Cmd+Shift = glyphViewCommandShiftIncrement (default 100).  Option +
+        arrow keys adjust stems without moving the block: Left/Right moves V
+        (isotropic when linkStems is True), Up/Down moves H only (unchecks
+        linkStems); Shift multiplies the stem increment from 1 to 10.
+
+        Args:
+            event: The NSEvent (or RoboFont key event wrapper) for the
+                key-down interaction.
         """
         verbosePrint("TransmutorTool::keyDown")
         if self._controller is None:
@@ -2548,7 +2988,11 @@ class TransmutorTool(BaseEventTool):
         self.drawHandles(g, self._controller.selectedBlockID)
 
     def didUndo(self, sender) -> None:
-        """Resync Merz drawing and panel state after an undo or redo."""
+        """Resync Merz drawing and panel state after an undo or redo operation.
+
+        Args:
+            sender: The RoboFont notification sender (unused).
+        """
         verbosePrint("TransmutorTool::didUndo")
         self._syncAfterHistoryChange()
 
