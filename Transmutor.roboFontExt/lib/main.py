@@ -51,6 +51,7 @@ finally:
 # by the DesignSpaceEditor extension.  Fall back to None when absent.
 AllDesignspaces = getattr(builtins, "AllDesignspaces", None)
 CurrentDesignspace = getattr(builtins, "CurrentDesignspace", None)
+AllFonts = getattr(builtins, "AllFonts", None)
 
 
 # ---------------------------------------------------------------------------
@@ -66,12 +67,19 @@ LIB_PREFIX = "co.ohnotype.transmutor"
 CONTOUR_SOURCE_KEY = f"{LIB_PREFIX}.source"
 BLOCK_ID_KEY = f"{LIB_PREFIX}.blockID"
 BLOCK_COLOR_KEY = f"{LIB_PREFIX}.color"
-# Font lib key used to persist the last-used designspace path across sessions.
 FONT_LIB_DS_KEY = f"{LIB_PREFIX}.lastDesignspace"
 
 BLOCK_STROKE_WIDTH = 8
 OUTLINE_ALPHA = 0.1
 HANDLE_SIZE = 10
+
+# macOS key codes used in keyDown
+_KEY_BACKSPACE = 51
+_KEY_FORWARD_DELETE = 117
+_KEY_LEFT = 123
+_KEY_RIGHT = 124
+_KEY_DOWN = 125
+_KEY_UP = 126
 
 # Merz container IDs
 _MERZ_BG_ID = "co.ohnotype.transmutor"
@@ -125,6 +133,8 @@ class DragState:
     scalingStartScaleY: Optional[float] = None
     scalingStartScalesEqual: bool = True
     scalingStartOffset: Optional[tuple] = None  # (ox, oy) offset snapshot
+    scalingStartStemV: Optional[float] = None
+    scalingStartStemH: Optional[float] = None
 
     # Stem drag
     stemDragging: bool = False
@@ -157,6 +167,8 @@ class DragState:
         self.scalingStartScaleY = None
         self.scalingStartScalesEqual = True
         self.scalingStartOffset = None
+        self.scalingStartStemV = None
+        self.scalingStartStemH = None
         self.stemDragging = False
         self.stemDragStartPoint = None
         self.stemDragStartV = None
@@ -1272,6 +1284,7 @@ class TransmutorController(ezui.WindowController):
                 height=150,
                 showColumnTitles=True,
                 alternatingRowColors=True,
+                doubleClickCallback=self.sourceFontTableDoubleClickCallback,
             ),
             glyphNameField=dict(value=DEFAULT_GLYPH_NAME),
             errorLabel=dict(text="\u00a0"),
@@ -1902,6 +1915,23 @@ class TransmutorController(ezui.WindowController):
         self._updateStemSliderRanges()
         self.updateSelectedBlock()
 
+    def sourceFontTableDoubleClickCallback(self, sender):
+        """Set stem sliders to the double-clicked row's stem values.
+
+        Does nothing if the row does not have numeric stems (shown as '—').
+        """
+        verbosePrint("TransmutorController::sourceFontTableDoubleClickCallback")
+        selection = sender.getSelectedIndexes()
+        if not selection:
+            return
+        row = sender.get()[selection[0]]
+        vStem = row.get("vStem")
+        hStem = row.get("hStem")
+        if not isinstance(vStem, (int, float)) or not isinstance(hStem, (int, float)):
+            return
+        self.stemValues = (float(vStem), float(hStem))
+        self.updateSelectedBlock()
+
     def glyphNameFieldCallback(self, sender):
         verbosePrint("TransmutorController::glyphNameFieldCallback")
         self._state.glyphName = sender.get().strip()
@@ -2019,6 +2049,21 @@ class TransmutorTool(BaseEventTool):
         g = CurrentGlyph()
         if g is not None:
             _scrubOrphanedObjectLibs(g)
+        self._hidePanel()
+
+    def fontWillClose(self, font) -> None:
+        """Hide the panel when the last font is closed.
+
+        fontWillClose fires before the font is removed, so AllFonts() still
+        includes it.  A count of 1 means this is the last open font.
+        """
+        verbosePrint("TransmutorTool::fontWillClose")
+        if AllFonts is not None and len(AllFonts()) <= 1:
+            self._hidePanel()
+
+    def _hidePanel(self) -> None:
+        """Hide the panel and clear all Merz layers."""
+        verbosePrint("TransmutorTool::_hidePanel")
         if self._controller is not None:
             self._controller.setTool(None)
             self._controller.w.hide()
@@ -2218,6 +2263,7 @@ class TransmutorTool(BaseEventTool):
         au, av = info["anchorNorm"]
         sx, sy = self._controller.scalePercent
         ox, oy = self._controller.offset
+        stemV, stemH = self._controller.stemValues
         self._drag.setState(
             scalingHandle=handleName,
             scalingHandleXY=(_lerp(xMin, xMax, hu), _lerp(yMin, yMax, hv)),
@@ -2226,6 +2272,8 @@ class TransmutorTool(BaseEventTool):
             scalingStartScaleY=float(sy),
             scalingStartScalesEqual=(float(sx) == float(sy)),
             scalingStartOffset=(float(ox), float(oy)),
+            scalingStartStemV=float(stemV),
+            scalingStartStemH=float(stemH),
         )
 
     def _beginOffsetDrag(self, point, glyph) -> None:
@@ -2312,6 +2360,29 @@ class TransmutorTool(BaseEventTool):
         self._controller.lockScale = (
             isCorner and self.shiftDown and self._drag.scalingStartScalesEqual
         )
+        # Option held: scale stems proportionally with the block so MutatorScale
+        # compensation is temporarily suspended.  V stems (vertical strokes,
+        # measured horizontally) scale with factor_H; H stems (horizontal
+        # strokes, measured vertically) scale with factor_V.  Releasing Option
+        # restores the original stem values.
+        if (
+            self.optionDown
+            and self._drag.scalingStartStemV is not None
+            and self._drag.scalingStartStemH is not None
+        ):
+            newStemV = max(1.0, self._drag.scalingStartStemV * factor_H)
+            newStemH = max(1.0, self._drag.scalingStartStemH * factor_V)
+            self._controller.stemValues = (newStemV, newStemH)
+        elif (
+            not self.optionDown
+            and self._drag.scalingStartStemV is not None
+            and self._drag.scalingStartStemH is not None
+        ):
+            # Option released mid-drag: restore original stems.
+            self._controller.stemValues = (
+                self._drag.scalingStartStemV,
+                self._drag.scalingStartStemH,
+            )
         # Store precise floats so rounding doesn't accumulate across frames
         self._controller.offset = (f"{newDx:.4f}", f"{newDy:.4f}")
         self._controller.updateSelectedBlock()
@@ -2405,13 +2476,13 @@ class TransmutorTool(BaseEventTool):
         keyCode = event.keyCode()
 
         # keyCode 51 = backspace/delete, 117 = forward delete
-        if keyCode in (51, 117):
+        if keyCode in (_KEY_BACKSPACE, _KEY_FORWARD_DELETE):
             if self._controller.selectedBlockID is not None:
                 self._controller.removeSelectedBlock()
             return
 
         # Arrow keys (123=left, 124=right, 125=down, 126=up)
-        if keyCode not in (123, 124, 125, 126):
+        if keyCode not in (_KEY_LEFT, _KEY_RIGHT, _KEY_DOWN, _KEY_UP):
             return
         if self._controller.selectedBlockID is None:
             return
@@ -2437,9 +2508,9 @@ class TransmutorTool(BaseEventTool):
             extLoV, extHiV = minV - spanV, maxV + spanV
             extLoH, extHiH = minH - spanH, maxH + spanH
 
-            if keyCode in (123, 124):
+            if keyCode in (_KEY_LEFT, _KEY_RIGHT):
                 # Left/Right — V moves; H mirrors if linked.
-                delta = stemIncrement if keyCode == 124 else -stemIncrement
+                delta = stemIncrement if keyCode == _KEY_RIGHT else -stemIncrement
                 newV = max(extLoV, min(extHiV, stemV + delta))
                 if self._controller.linkStems:
                     t = (newV - minV) / spanV if spanV != 0 else 0.0
@@ -2449,7 +2520,7 @@ class TransmutorTool(BaseEventTool):
                 self._controller.stemValues = (newV, newH)
             else:
                 # Up/Down — H only; unlink.
-                delta = stemIncrement if keyCode == 126 else -stemIncrement
+                delta = stemIncrement if keyCode == _KEY_UP else -stemIncrement
                 newH = max(extLoH, min(extHiH, stemH + delta))
                 self._controller.linkStems = False
                 self._controller.stemValues = (stemV, newH)
@@ -2466,8 +2537,8 @@ class TransmutorTool(BaseEventTool):
         else:
             increment = 1
 
-        dx = {123: -increment, 124: increment}.get(keyCode, 0)
-        dy = {125: -increment, 126: increment}.get(keyCode, 0)
+        dx = {_KEY_LEFT: -increment, _KEY_RIGHT: increment}.get(keyCode, 0)
+        dy = {_KEY_DOWN: -increment, _KEY_UP: increment}.get(keyCode, 0)
 
         ox, oy = self._controller.offset
         g.prepareUndo("Nudge Block")
